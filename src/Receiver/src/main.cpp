@@ -21,6 +21,11 @@
 #include "opendroneid.h"
 #include "odid_wifi.h"
 #include <esp_timer.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
+#include <Wire.h>
+#include <Adafruit_MAX1704X.h>
+#include <Adafruit_NeoPixel.h>
 
 // Structure to hold UAV detection data
 struct uav_data
@@ -59,6 +64,7 @@ uav_data uavs[MAX_UAVS] = {};
 
 BLEScan *pBLEScan = nullptr;
 NimBLECharacteristic *pTelemetryCharacteristic = nullptr;
+NimBLECharacteristic *pBatteryLevelCharacteristic = nullptr;
 SemaphoreHandle_t bleTxMutex = nullptr;
 QueueHandle_t uavEventQueue = nullptr;
 volatile bool bleClientConnected = false;
@@ -66,26 +72,38 @@ ODID_UAS_Data UAS_data;
 unsigned long last_status = 0;
 unsigned long last_drone_seen = 0;
 unsigned long last_ble_heartbeat = 0;
-unsigned long led_off_at = 0;
+unsigned long last_pixel_idle_blink = 0;
+unsigned long pixel_off_at = 0;
+unsigned long data_signal_until = 0;
+Adafruit_MAX17048 maxlipo;
+unsigned long last_battery_update = 0;
+Preferences blePrefs;
+uint32_t blePasskey = 123456;
+String serialCommandBuffer;
+unsigned long buttonPressStart = 0;
+bool buttonWasPressed = false;
+bool requireButtonReleaseAfterWake = false;
+bool buttonSleepArmed = false;
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 21
 #endif
 
-static void blink_led(uint32_t duration_ms = 25)
-{
-  digitalWrite(LED_BUILTIN, HIGH);
-  led_off_at = millis() + duration_ms;
-}
-Preferences blePrefs;
-uint32_t blePasskey = 123456;
-String serialCommandBuffer;
+#ifndef NEOPIXEL_PIN
+#ifdef PIN_NEOPIXEL
+#define NEOPIXEL_PIN PIN_NEOPIXEL
+#else
+#define NEOPIXEL_PIN 8
+#endif
+#endif
 
 static const char *BLE_SERVICE_UUID = "12345678-1234-1234-1234-1234567890ab";
 static const char *BLE_TELEMETRY_UUID = "12345678-1234-1234-1234-1234567890ac";
 static const uint32_t BLE_PASSKEY_DEFAULT = 123456;
 static const char *BLE_PREF_NAMESPACE = "blecfg";
 static const char *BLE_PREF_PASSKEY = "passkey";
+static const gpio_num_t BUTTON_PIN = GPIO_NUM_10;
+static const unsigned long BUTTON_HOLD_TIME_MS = 5000;
 
 // Forward declarations
 void callback(void *, wifi_promiscuous_pkt_type_t);
@@ -99,6 +117,69 @@ bool set_ble_passkey(uint32_t newPasskey);
 bool enqueue_uav_event(const uav_data *data, uav_source_t source);
 const char *source_extra_fields(uav_source_t source);
 bool parse_serial_injected_uav(const String &payload, uav_data *out);
+
+Adafruit_NeoPixel statusPixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+static void set_status_pixel(uint8_t r, uint8_t g, uint8_t b, uint32_t duration_ms = 0)
+{
+  statusPixel.setPixelColor(0, statusPixel.Color(r, g, b));
+  statusPixel.show();
+  if (duration_ms > 0)
+  {
+    pixel_off_at = millis() + duration_ms;
+  }
+  else
+  {
+    pixel_off_at = 0;
+  }
+}
+
+static void clear_status_pixel()
+{
+  statusPixel.setPixelColor(0, 0);
+  statusPixel.show();
+  pixel_off_at = 0;
+}
+
+static void signal_data_received()
+{
+  set_status_pixel(0, 0, 255, 250);
+  data_signal_until = millis() + 250;
+}
+
+static void signal_idle_blink()
+{
+  if (millis() < data_signal_until)
+  {
+    return;
+  }
+  set_status_pixel(0, 255, 0, 250);
+}
+
+static void signal_low_battery_blink()
+{
+  if (millis() < data_signal_until)
+  {
+    return;
+  }
+  set_status_pixel(255, 0, 0, 250);
+}
+
+static void update_status_pixel(unsigned long current_millis)
+{
+  if (pixel_off_at > 0 && current_millis >= pixel_off_at)
+  {
+    clear_status_pixel();
+    pixel_off_at = 0;
+  }
+
+  if (last_drone_seen > 0 && (current_millis - last_drone_seen) >= 30000UL &&
+      (current_millis - last_pixel_idle_blink) >= 30000UL)
+  {
+    signal_idle_blink();
+    last_pixel_idle_blink = current_millis;
+  }
+}
 
 bool enqueue_uav_event(const uav_data *data, uav_source_t source)
 {
@@ -321,6 +402,33 @@ uav_data *next_uav(uint8_t *mac)
   }
   return &uavs[0]; // Fallback to first slot if all are used
 }
+
+static void update_battery_level(unsigned long current_millis)
+{
+  if (!pBatteryLevelCharacteristic)
+    return;
+  if ((current_millis - last_battery_update) < 10000UL)
+    return; // alle 10s
+  last_battery_update = current_millis;
+
+  float soc = maxlipo.cellPercent();
+  if (isnan(soc) || soc < 0)
+    soc = 0;
+  if (soc > 100)
+    soc = 100;
+  uint8_t percent = (uint8_t)soc;
+  pBatteryLevelCharacteristic->setValue(&percent, 1);
+  if (bleClientConnected)
+  {
+    pBatteryLevelCharacteristic->notify();
+  }
+  if (percent <= 15)
+  {
+    signal_low_battery_blink();
+  }
+  float vbat = maxlipo.cellVoltage();
+  Serial.printf("[BAT] SoC: %u%%, Voltage: %.3f V\n", percent, vbat);
+};
 
 // BLE Advertisement callback handler
 class MyAdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks
@@ -640,7 +748,7 @@ void send_json_fast(const uav_data *UAV, const char *extra_fields)
            "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%.6f,\"drone_long\":%.6f,"
            "\"drone_altitude\":%d,\"drone_heading\":%d,\"pilot_lat\":%.6f,\"pilot_long\":%.6f,"
            "\"basic_id\":\"%s\"%s}",
-           mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,UAV->heading,
+           mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->heading,
            UAV->base_lat_d, UAV->base_long_d, UAV->uav_id, extra_fields);
   Serial.println(json_msg);
 
@@ -672,7 +780,7 @@ void send_waypoint_notifications(const uav_data *UAV, const char *source)
 
     bool has_valid_base_coords = has_valid_coords(UAV->base_lat_d, UAV->base_long_d);
     int32_t base_lat_e7 = deg_to_e7(UAV->base_lat_d);
-    int32_t base_lon_e7 = deg_to_e7(UAV->base_long_d);    
+    int32_t base_lon_e7 = deg_to_e7(UAV->base_long_d);
 
     snprintf(payload, sizeof(payload),
              "{\"type\":\"waypoint\",\"role\":\"drone\",\"source\":\"%s\",\"mac\":\"%s\",\"waypoint\":{\"id\":\"drone_%02x%02x%02x%02x%02x%02x\",\"Drone\":\"%s\",\"latitudeI\":%ld,\"longitudeI\":%ld,\"altitude\":%d,\"heading\":%d,\"speed\":%d,\"base_latitudeI\":%ld,\"base_longitudeI\":%ld, \"base_valid\":%d}}",
@@ -841,7 +949,7 @@ void uavProcessTask(void *parameter)
     if (xQueueReceive(uavEventQueue, &event, pdMS_TO_TICKS(100)) == pdTRUE)
     {
       last_drone_seen = millis();
-      blink_led(50);
+      signal_data_received();
       uav_data *dbUAV = next_uav(event.data.mac);
       memcpy(dbUAV, &event.data, sizeof(uav_data));
       send_json_fast(dbUAV, source_extra_fields(event.source));
@@ -849,19 +957,15 @@ void uavProcessTask(void *parameter)
 
     unsigned long current_millis = millis();
 
-    // Turn off LED after blink duration
-    if (led_off_at > 0 && current_millis >= led_off_at)
-    {
-      digitalWrite(LED_BUILTIN, LOW);
-      led_off_at = 0;
-    }
-
     if ((current_millis - last_status) > 60000UL)
     {
       Serial.println("{\"heartbeat\":\"Device is active and running.\"}");
-      blink_led(200);
+      signal_idle_blink();
       last_status = current_millis;
     }
+
+    update_status_pixel(current_millis);
+    update_battery_level(current_millis);
 
     // BLE heartbeat: notify connected client every 10s when no drone has been seen for 15s
     if (bleClientConnected &&
@@ -877,6 +981,8 @@ void uavProcessTask(void *parameter)
 void setup()
 {
 
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
   pinMode(38, OUTPUT);
@@ -884,6 +990,13 @@ void setup()
   setCpuFrequencyMhz(160);
   nvs_flash_init();
   initializeSerial();
+  last_status = millis();
+  esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  if (wakeCause == ESP_SLEEP_WAKEUP_EXT0)
+  {
+    requireButtonReleaseAfterWake = true;
+    Serial.println("Wakeup by button (EXT0). Release button to re-arm sleep.");
+  }
   load_ble_passkey();
   uavEventQueue = xQueueCreate(64, sizeof(uav_event));
   if (uavEventQueue == nullptr)
@@ -921,6 +1034,9 @@ void setup()
       BLE_TELEMETRY_UUID,
       NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::NOTIFY);
   pTelemetryCharacteristic->setValue("ready");
+
+  pBatteryLevelCharacteristic = pService->createCharacteristic("2A19", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  pBatteryLevelCharacteristic->setValue((uint8_t)100);
   pService->start();
 
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
@@ -939,12 +1055,78 @@ void setup()
   // Initialize UAV tracking array
   memset(uavs, 0, sizeof(uavs));
 
+  // Battery monitor init
+  Wire.begin();
+  if (!maxlipo.begin())
+  {
+    Serial.println("MAX17048 not found! Check wiring.");
+  }
+  else
+  {
+    Serial.println("MAX17048 battery monitor initialized.");
+  }
+
   // Create tasks for BLE scanning and single UAV event processing
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(uavProcessTask, "UAVProcessTask", 12000, NULL, 1, NULL, 1);
 }
 
+// --- Deep Sleep Button Logic ---
+
+void checkButtonForDeepSleep()
+{
+  int buttonState = digitalRead(BUTTON_PIN);
+
+  if (requireButtonReleaseAfterWake)
+  {
+    if (buttonState == HIGH)
+    {
+      requireButtonReleaseAfterWake = false;
+      buttonWasPressed = false;
+      buttonPressStart = 0;
+    }
+    return;
+  }
+
+  if (buttonState == LOW)
+  { // Button pressed (assuming pull-up)
+    set_status_pixel(255, 0, 0);
+
+    if (!buttonWasPressed)
+    {
+      buttonPressStart = millis();
+      buttonWasPressed = true;
+      buttonSleepArmed = false;
+    }
+    else if (!buttonSleepArmed && (millis() - buttonPressStart >= BUTTON_HOLD_TIME_MS))
+    {
+      buttonSleepArmed = true;
+      Serial.println("Button held for 5 seconds, release to enter deep sleep...");
+    }
+  }
+  else
+  {
+    if (buttonWasPressed && buttonSleepArmed)
+    {
+      Serial.println("Entering deep sleep...");
+      delay(100);
+      // Configure wakeup: wake on next button press (LOW)
+      rtc_gpio_pullup_en((gpio_num_t)BUTTON_PIN);
+      rtc_gpio_pulldown_dis((gpio_num_t)BUTTON_PIN);
+      esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, 0);
+      Serial.flush();
+      delay(100);
+      esp_deep_sleep_start();
+    }
+
+    clear_status_pixel();
+    buttonWasPressed = false;
+    buttonSleepArmed = false;
+  }
+}
+
 void loop()
 {
   process_serial_commands();
+  checkButtonForDeepSleep();
 }
