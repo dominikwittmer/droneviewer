@@ -1034,13 +1034,16 @@ void setup()
       BLE_TELEMETRY_UUID,
       NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::NOTIFY);
   pTelemetryCharacteristic->setValue("ready");
-
-  pBatteryLevelCharacteristic = pService->createCharacteristic("2A19", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-  pBatteryLevelCharacteristic->setValue((uint8_t)100);
   pService->start();
+
+  NimBLEService *pBattService = pServer->createService("0000180f-0000-1000-8000-00805f9b34fb");
+  pBatteryLevelCharacteristic = pBattService->createCharacteristic("00002a19-0000-1000-8000-00805f9b34fb", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  pBatteryLevelCharacteristic->setValue((uint8_t)100);
+  pBattService->start();
 
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(BLE_SERVICE_UUID);
+  pAdvertising->addServiceUUID("0000180f-0000-1000-8000-00805f9b34fb");
   refresh_ble_whitelist_filter();
   pAdvertising->start();
 
