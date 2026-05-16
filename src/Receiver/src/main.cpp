@@ -65,6 +65,7 @@ uav_data uavs[MAX_UAVS] = {};
 BLEScan *pBLEScan = nullptr;
 NimBLECharacteristic *pTelemetryCharacteristic = nullptr;
 NimBLECharacteristic *pBatteryLevelCharacteristic = nullptr;
+NimBLECharacteristic *pBatteryChargeStateCharacteristic = nullptr;
 SemaphoreHandle_t bleTxMutex = nullptr;
 QueueHandle_t uavEventQueue = nullptr;
 volatile bool bleClientConnected = false;
@@ -81,6 +82,9 @@ Preferences blePrefs;
 uint32_t blePasskey = 123456;
 String serialCommandBuffer;
 unsigned long buttonPressStart = 0;
+unsigned long buttonLastEdgeAt = 0;
+int buttonRawState = HIGH;
+int buttonDebouncedState = HIGH;
 bool buttonWasPressed = false;
 bool requireButtonReleaseAfterWake = false;
 bool buttonSleepArmed = false;
@@ -99,11 +103,21 @@ bool buttonSleepArmed = false;
 
 static const char *BLE_SERVICE_UUID = "12345678-1234-1234-1234-1234567890ab";
 static const char *BLE_TELEMETRY_UUID = "12345678-1234-1234-1234-1234567890ac";
+static const char *BLE_BATTERY_CHARGE_STATE_UUID = "12345678-1234-1234-1234-1234567890ad";
 static const uint32_t BLE_PASSKEY_DEFAULT = 123456;
 static const char *BLE_PREF_NAMESPACE = "blecfg";
 static const char *BLE_PREF_PASSKEY = "passkey";
 static const gpio_num_t BUTTON_PIN = GPIO_NUM_10;
+static const unsigned long BUTTON_DEBOUNCE_MS = 40;
 static const unsigned long BUTTON_HOLD_TIME_MS = 5000;
+static const float BATTERY_CHARGE_STATE_DEADBAND_PCT_PER_H = 0.5f;
+
+enum battery_charge_state_t : uint8_t
+{
+  BATTERY_STATE_DISCHARGING = 0,
+  BATTERY_STATE_CHARGING = 1,
+  BATTERY_STATE_IDLE = 2,
+};
 
 // Forward declarations
 void callback(void *, wifi_promiscuous_pkt_type_t);
@@ -418,16 +432,36 @@ static void update_battery_level(unsigned long current_millis)
     soc = 100;
   uint8_t percent = (uint8_t)soc;
   pBatteryLevelCharacteristic->setValue(&percent, 1);
+
+  float chargeRatePctPerHour = maxlipo.chargeRate();
+  uint8_t chargeState = BATTERY_STATE_IDLE;
+  if (chargeRatePctPerHour > BATTERY_CHARGE_STATE_DEADBAND_PCT_PER_H)
+  {
+    chargeState = BATTERY_STATE_CHARGING;
+  }
+  else if (chargeRatePctPerHour < -BATTERY_CHARGE_STATE_DEADBAND_PCT_PER_H)
+  {
+    chargeState = BATTERY_STATE_DISCHARGING;
+  }
+  if (pBatteryChargeStateCharacteristic)
+  {
+    pBatteryChargeStateCharacteristic->setValue(&chargeState, 1);
+  }
+
   if (bleClientConnected)
   {
     pBatteryLevelCharacteristic->notify();
+    if (pBatteryChargeStateCharacteristic)
+    {
+      pBatteryChargeStateCharacteristic->notify();
+    }
   }
   if (percent <= 15)
   {
     signal_low_battery_blink();
   }
   float vbat = maxlipo.cellVoltage();
-  Serial.printf("[BAT] SoC: %u%%, Voltage: %.3f V\n", percent, vbat);
+  Serial.printf("[BAT] SoC: %u%%, Voltage: %.3f V, ChargeRate: %.2f %%/h, State: %u\n", percent, vbat, chargeRatePctPerHour, chargeState);
 };
 
 // BLE Advertisement callback handler
@@ -980,9 +1014,17 @@ void uavProcessTask(void *parameter)
 
 void setup()
 {
+  esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  if (wakeCause == ESP_SLEEP_WAKEUP_EXT0)
+  {
+    // After EXT0 wake, return RTC IO pin to normal GPIO mode.
+    rtc_gpio_deinit((gpio_num_t)BUTTON_PIN);
+  }
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-
+  buttonRawState = digitalRead(BUTTON_PIN);
+  buttonDebouncedState = buttonRawState;
+  buttonLastEdgeAt = millis();
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
   pinMode(38, OUTPUT);
@@ -991,7 +1033,6 @@ void setup()
   nvs_flash_init();
   initializeSerial();
   last_status = millis();
-  esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   if (wakeCause == ESP_SLEEP_WAKEUP_EXT0)
   {
     requireButtonReleaseAfterWake = true;
@@ -1038,7 +1079,9 @@ void setup()
 
   NimBLEService *pBattService = pServer->createService("0000180f-0000-1000-8000-00805f9b34fb");
   pBatteryLevelCharacteristic = pBattService->createCharacteristic("00002a19-0000-1000-8000-00805f9b34fb", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  pBatteryChargeStateCharacteristic = pBattService->createCharacteristic(BLE_BATTERY_CHARGE_STATE_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
   pBatteryLevelCharacteristic->setValue((uint8_t)100);
+  pBatteryChargeStateCharacteristic->setValue((uint8_t)BATTERY_STATE_IDLE);
   pBattService->start();
 
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
@@ -1069,6 +1112,17 @@ void setup()
     Serial.println("MAX17048 battery monitor initialized.");
   }
 
+  statusPixel.begin();
+  statusPixel.setBrightness(100);
+  signal_idle_blink();
+  delay(250);
+  signal_data_received();
+  delay(250);
+  signal_idle_blink();
+  delay(250);
+  signal_data_received();
+  delay(250);
+
   // Create tasks for BLE scanning and single UAV event processing
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(uavProcessTask, "UAVProcessTask", 12000, NULL, 1, NULL, 1);
@@ -1078,7 +1132,19 @@ void setup()
 
 void checkButtonForDeepSleep()
 {
-  int buttonState = digitalRead(BUTTON_PIN);
+  int rawState = digitalRead(BUTTON_PIN);
+  if (rawState != buttonRawState)
+  {
+    buttonRawState = rawState;
+    buttonLastEdgeAt = millis();
+  }
+
+  if ((millis() - buttonLastEdgeAt) >= BUTTON_DEBOUNCE_MS)
+  {
+    buttonDebouncedState = buttonRawState;
+  }
+
+  int buttonState = buttonDebouncedState;
 
   if (requireButtonReleaseAfterWake)
   {
@@ -1112,7 +1178,10 @@ void checkButtonForDeepSleep()
     if (buttonWasPressed && buttonSleepArmed)
     {
       Serial.println("Entering deep sleep...");
-      delay(100);
+      signal_data_received();
+      delay(250);
+      clear_status_pixel();
+
       // Configure wakeup: wake on next button press (LOW)
       rtc_gpio_pullup_en((gpio_num_t)BUTTON_PIN);
       rtc_gpio_pulldown_dis((gpio_num_t)BUTTON_PIN);
