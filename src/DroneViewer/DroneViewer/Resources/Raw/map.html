@@ -1,0 +1,1595 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Drone Map</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- MapLibre GL CSS - wird dynamisch geladen -->
+    <link id="maplibre-css" rel="stylesheet" />
+
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Fallback während MapLibre lädt */
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-family: Arial, sans-serif;
+            color: #666;
+        }
+
+        /* Drone Info Overlay */
+        #drone-overlay {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            padding: 16px;
+            min-width: 250px;
+            max-width: 300px;
+            display: none;
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        #drone-overlay.visible {
+            display: block;
+        }
+
+        .overlay-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .overlay-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .close-btn {
+            background: #ff4444;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 28px;
+            height: 28px;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 28px;
+            text-align: center;
+            padding: 0;
+        }
+
+        .close-btn:hover {
+            background: #cc0000;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            padding: 6px 0;
+        }
+
+        .info-label {
+            font-weight: 600;
+            color: #666;
+        }
+
+        .info-value {
+            font-weight: 500;
+            color: #333;
+        }
+
+        .info-value.position {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        /* Custom Marker Icons */
+        .drone-marker {
+            background-image: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIyMCIgY3k9IjIwIiByPSIxNCIgZmlsbD0iIzQwNDA0MCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIi8+PGNpcmNsZSBjeD0iMjAiIGN5PSIyMCIgcj0iNCIgZmlsbD0iI2ZmNDQ0NCIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxLjIiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIyLjUiIGZpbGw9IiNmZjY2NjYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMC44Ii8+PGNpcmNsZSBjeD0iMjgiIGN5PSIxMiIgcj0iMi41IiBmaWxsPSIjZmY2NjY2IiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjAuOCIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMjgiIHI9IjIuNSIgZmlsbD0iI2ZmNjY2NiIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIwLjgiLz48Y2lyY2xlIGN4PSIyOCIgY3k9IjI4IiByPSIyLjUiIGZpbGw9IiNmZjY2NjYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMC44Ii8+PGxpbmUgeDE9IjIwIiB5MT0iMjAiIHgyPSIxMiIgeTI9IjEyIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjEuMiIvPjxsaW5lIHgxPSIyMCIgeTE9IjIwIiB4Mj0iMjgiIHkyPSIxMiIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxLjIiLz48bGluZSB4MT0iMjAiIHkxPSIyMCIgeDI9IjEyIiB5Mj0iMjgiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS4yIi8+PGxpbmUgeDE9IjIwIiB5MT0iMjAiIHgyPSIyOCIgeTI9IjI4IiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjEuMiIvPjwvc3ZnPg==');
+            background-size: cover;
+            width: 40px;
+            height: 40px;
+            cursor: pointer;
+        }
+
+        .operator-marker {
+            background-image: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxNiIgY3k9IjE2IiByPSIxNCIgZmlsbD0iIzQ0ODhmZiIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIi8+PGNpcmNsZSBjeD0iMTYiIGN5PSIxMiIgcj0iNCIgZmlsbD0id2hpdGUiLz48cGF0aCBkPSJNIDEwIDE4IEMgMTAgMTggMTAgMTYgMTYgMTYgQyAyMiAxNiAyMiAxOCAyMiAxOCBMIDIyIDI0IEwgMTAgMjQgWiIgZmlsbD0id2hpdGUiLz48L3N2Zz4=');
+            background-size: cover;
+            width: 32px;
+            height: 32px;
+            cursor: pointer;
+        }
+        /* Battery Indicator */
+        #battery-indicator {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.75);
+            border-radius: 20px;
+            padding: 8px 16px;
+            display: none;
+            align-items: center;
+            gap: 8px;
+            z-index: 999;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            transition: all 0.3s ease;
+        }
+
+            #battery-indicator.visible {
+                display: flex;
+            }
+
+        #battery-icon {
+            font-size: 20px;
+            line-height: 1;
+        }
+
+        #battery-level {
+            color: white;
+            font-weight: bold;
+            font-size: 14px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+        }
+
+        #battery-indicator.low {
+            background: rgba(255, 152, 0, 0.9);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        #battery-indicator.critical {
+            background: rgba(244, 67, 54, 0.9);
+            animation: pulse 1s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="loading">Karte wird geladen...</div>
+    <div id="map"></div>
+
+    <!-- Battery Indicator (oben rechts) -->
+    <div id="battery-indicator">
+        <span id="battery-icon">🔋</span>
+        <span id="battery-level">--%</span>
+    </div>
+
+
+    <!-- Drone Info Overlay -->
+    <div id="drone-overlay">
+        <div class="overlay-header">
+            <div class="overlay-title" id="overlay-title">Drohne</div>
+            <button class="close-btn" onclick="closeDroneOverlay()">×</button>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Position:</span>
+            <span class="info-value position" id="overlay-position">-</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Höhe:</span>
+            <span class="info-value" id="overlay-altitude">-</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Geschw.:</span>
+            <span class="info-value" id="overlay-speed">-</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Richtung:</span>
+            <span class="info-value" id="overlay-heading">-</span>
+        </div>
+    </div>
+
+    <script>
+        // Globaler Error Handler
+        window.addEventListener('error', function (event) {
+            console.error('Global error caught:', event.message);
+            console.error('  at:', event.filename + ':' + event.lineno + ':' + event.colno);
+            console.error('  stack:', event.error ? event.error.stack : 'no stack');
+        });
+
+        window.addEventListener('unhandledrejection', function (event) {
+            console.error('Unhandled promise rejection:', event.reason);
+            console.error('  Promise:', event.promise);
+            if (event.reason && event.reason.stack) {
+                console.error('  Stack:', event.reason.stack);
+            }
+        });
+
+        // Globale Konfiguration
+        let isOfflineMode = false;
+        let map = null;
+
+        // Lade MapLibre GL dynamisch
+        function loadMapLibre(useOffline) {
+            console.log('loadMapLibre called with useOffline=' + useOffline);
+            isOfflineMode = useOffline;
+
+            // CSS laden
+            const cssLink = document.getElementById('maplibre-css');
+            if (useOffline) {
+                cssLink.href = 'maplibre-gl.css';
+            } else {
+                cssLink.href = 'https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.css';
+            }
+
+            // JavaScript laden
+            const script = document.createElement('script');
+            if (useOffline) {
+                script.src = 'maplibre-gl.js';
+            } else {
+                script.src = 'https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.js';
+            }
+
+            script.onload = function () {
+                console.log('MapLibre GL loaded successfully');
+                document.getElementById('loading').style.display = 'none';
+                try {
+                    initializeMap();
+                } catch (error) {
+                    console.error('Error initializing map:', error);
+                    document.getElementById('loading').innerText = 'Fehler beim Initialisieren: ' + error.message;
+                }
+            };
+
+            script.onerror = function (error) {
+                console.error('Error loading MapLibre GL script:', error);
+                document.getElementById('loading').innerText = 'Fehler beim Laden der Karte';
+            };
+
+            document.head.appendChild(script);
+            console.log('MapLibre script tag added to head');
+        }
+
+        function initializeMap() {
+            console.log('Initializing map...');
+            try {
+                map = new maplibregl.Map({
+                    container: 'map',
+                    style: {
+                        version: 8,
+                        sources: {
+                            swisstopo: {
+                                type: "raster",
+                                tiles: [
+                                    "https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg"
+                                ],
+                                tileSize: 256
+                            }
+                        },
+                        layers: [
+                            {
+                                id: "background",
+                                type: "background",
+                                paint: {
+                                    "background-color": "#f8f4f0"
+                                }
+                            },
+                            {
+                                id: "swisstopo-layer",
+                                type: "raster",
+                                source: "swisstopo"
+                            }
+                        ]
+                    },
+                    center: [8.54, 47.37],
+                    zoom: 10,
+                    renderWorldCopies: false
+                });
+
+                console.log('Map object created');
+
+                // Flugbahn hinzufügen
+                map.on('load', () => {
+                    console.log('Map loaded event fired');
+                    // Prüfe ob Source bereits existiert (kann bei Reload passieren)
+                    if (!map.getSource('drone-path')) {
+                        map.addSource('drone-path', {
+                            type: 'geojson',
+                            data: {
+                                type: 'Feature',
+                                geometry: {
+                                    type: 'LineString',
+                                    coordinates: []
+                                }
+                            }
+                        });
+
+                        map.addLayer({
+                            id: 'drone-line',
+                            type: 'line',
+                            source: 'drone-path',
+                            paint: {
+                                'line-color': '#ff0000',
+                                'line-width': 3
+                            }
+                        });
+                        console.log('Drone path layer added');
+                    }
+                });
+
+                map.on('error', (e) => {
+                    console.error('=== MAP ERROR EVENT ===');
+                    console.error('Error type:', e.error ? e.error.constructor.name : 'unknown');
+                    console.error('Error message:', e.error ? e.error.message : (e.message || 'no message'));
+                    console.error('Error stack:', e.error ? e.error.stack : 'no stack');
+                    if (e.sourceId) console.error('Source ID:', e.sourceId);
+                    if (e.tile) console.error('Tile coords:', e.tile.tileID ? e.tile.tileID.canonical : 'unknown');
+
+                    // Versuche wichtige Properties zu loggen ohne zirkuläre Referenzen
+                    try {
+                        const safeProps = {};
+                        for (const key in e) {
+                            if (e.hasOwnProperty(key) && typeof e[key] !== 'object') {
+                                safeProps[key] = e[key];
+                            }
+                        }
+                        console.error('Event properties:', JSON.stringify(safeProps));
+                    } catch (err) {
+                        console.error('Could not stringify event properties');
+                    }
+                    console.error('======================');
+                });
+
+                // Stelle sicher, dass inaktive Marker nach dem Scrollen ihre Styles behalten
+                map.on('moveend', () => {
+                    restoreInactiveStyles();
+                });
+
+                // Auch während der Bewegung und nach jedem Render
+                map.on('move', () => {
+                    restoreInactiveStyles();
+                });
+
+                map.on('render', () => {
+                    restoreInactiveStyles();
+                });
+
+                console.log('Map initialization complete');
+            } catch (error) {
+                console.error('Error in initializeMap:', error);
+                throw error;
+            }
+        }
+
+        // Tile-Cache für bereits geladene Tiles
+        let tileCache = {};
+
+        // Offline-Modus mit Tile-Loading über C#
+        function setOfflineMode(styleJsonString) {
+            if (!map) {
+                console.error('setOfflineMode: map is null');
+                return;
+            }
+
+            console.log('Setting offline mode...');
+
+            // Cache leeren beim Setzen des Offline-Modus
+            tileCache = {};
+            console.log("Tile cache cleared for offline mode");
+
+            try {
+                // Custom protocol für Offline-Tiles (unterstützt sowohl Promise als auch Callback)
+                maplibregl.addProtocol('mbtiles', (params, callback) => {
+                    const url = params.url;
+                    console.log('Protocol handler called for:', url, 'callback:', typeof callback);
+
+                    // URL format: mbtiles://z/x/y
+                    const match = url.match(/mbtiles:\/\/(\d+)\/(\d+)\/(\d+)/);
+
+                    if (!match) {
+                        const error = new Error('Invalid mbtiles URL: ' + url);
+                        console.error(error);
+                        if (typeof callback === 'function') {
+                            callback(error);
+                            return { cancel: () => { } };
+                        }
+                        return Promise.reject(error);
+                    }
+
+                    const z = parseInt(match[1]);
+                    const x = parseInt(match[2]);
+                    const y = parseInt(match[3]);
+                    const cacheKey = z + '/' + x + '/' + y;
+
+                    console.log('Requesting tile:', cacheKey);
+
+                    // Prüfe Cache
+                    if (tileCache[cacheKey]) {
+                        console.log('Tile found in cache:', cacheKey);
+                        const data = tileCache[cacheKey];
+                        if (typeof callback === 'function') {
+                            callback(null, data, null, null);
+                            return { cancel: () => { } };
+                        }
+                        return Promise.resolve({ data: data });
+                    }
+
+                    // Bestimme ob Callback- oder Promise-Modus
+                    const isCallbackMode = typeof callback === 'function';
+                    console.log('Request mode:', isCallbackMode ? 'callback' : 'promise');
+
+                    // Tile von C# anfordern
+                    const promise = requestTileFromCSharp(z, x, y)
+                        .then(dataUrl => {
+                            console.log('Received tile data for', cacheKey, 'length:', dataUrl ? dataUrl.length : 0);
+                            if (dataUrl && dataUrl !== 'null') {
+                                try {
+                                    // Base64 zu ArrayBuffer konvertieren
+                                    if (!dataUrl.includes(',')) {
+                                        throw new Error('Invalid data URL format - no comma found');
+                                    }
+                                    const base64 = dataUrl.split(',')[1];
+                                    if (!base64) {
+                                        throw new Error('Invalid data URL format - no base64 data after comma');
+                                    }
+                                    console.log('Base64 data length:', base64.length);
+
+                                    const binary = atob(base64);
+                                    console.log('Binary length:', binary.length);
+
+                                    const bytes = new Uint8Array(binary.length);
+                                    for (let i = 0; i < binary.length; i++) {
+                                        bytes[i] = binary.charCodeAt(i);
+                                    }
+                                    const buffer = bytes.buffer;
+                                    tileCache[cacheKey] = buffer;
+
+                                    console.log('Tile converted to buffer:', cacheKey, 'size:', buffer.byteLength);
+
+                                    if (isCallbackMode) {
+                                        callback(null, buffer, null, null);
+                                        return buffer; // Callback-Modus: Rückgabewert egal
+                                    }
+                                    return { data: buffer }; // Promise-Modus: data-Objekt zurück
+                                } catch (conversionError) {
+                                    console.error('Error converting tile data:', conversionError);
+                                    console.error('dataUrl preview:', dataUrl.substring(0, 100));
+                                    const error = new Error('Tile conversion failed for ' + cacheKey + ': ' + conversionError.message);
+                                    if (isCallbackMode) {
+                                        callback(error);
+                                        return null;
+                                    }
+                                    return Promise.reject(error);
+                                }
+                            } else {
+                                const error = new Error('Tile not found: ' + cacheKey);
+                                console.warn(error);
+                                if (isCallbackMode) {
+                                    callback(error);
+                                    return null; // Callback-Modus: Fehler bereits gemeldet
+                                }
+                                return Promise.reject(error); // Promise-Modus: rejected promise
+                            }
+                        })
+                        .catch(err => {
+                            console.error('Error loading tile', cacheKey, ':', err);
+                            if (isCallbackMode) {
+                                callback(err);
+                                return null; // Callback-Modus: Fehler bereits gemeldet
+                            }
+                            return Promise.reject(err); // Promise-Modus: rejected promise weiterleiten
+                        });
+
+                    // Im Callback-Modus, gib cancel-Funktion zurück
+                    // Im Promise-Modus, gib Promise zurück
+                    if (isCallbackMode) {
+                        return { cancel: () => { } };
+                    }
+                    return promise;
+                });
+
+                console.log('Protocol handler registered successfully');
+
+            } catch (error) {
+                console.error('Error registering protocol handler:', error);
+            }
+
+            // Lade den Style inline (Fallback wenn externe JSON nicht funktioniert)
+            console.log('Setting inline style...');
+
+            map.setStyle({
+                version: 8,
+                sources: {
+                    "offline-tiles": {
+                        type: "vector",
+                        tiles: ["mbtiles://{z}/{x}/{y}"],
+                        maxzoom: 14,
+                        minzoom: 0,
+                        scheme: "xyz",
+                        volatile: true
+                    }
+                },
+                layers: [
+                    // Hintergrund
+                    {
+                        id: "background",
+                        type: "background",
+                        "layout": {
+                            "visibility": "visible"
+                        },
+                        "paint": {
+                            "background-color": "rgb(253, 253, 254)"
+                        }
+                    },
+                    // Wasser (OpenMapTiles Schema)
+                    {
+                        id: "water",
+                        type: "fill",
+                        source: "offline-tiles",
+                        "source-layer": "water",
+                        paint: {
+                            "fill-color": "#b3d9f2"
+                        }
+                    },
+                    // Wasserlinien
+                    {
+                        id: "waterway",
+                        type: "line",
+                        source: "offline-tiles",
+                        "source-layer": "waterway",
+                        paint: {
+                            "line-color": "#b3d9f2",
+                            "line-width": 1.5
+                        }
+                    },
+                    // Landnutzung
+                    {
+                        id: "landuse",
+                        type: "fill",
+                        source: "offline-tiles",
+                        "source-layer": "landuse",
+                        paint: {
+                            "fill-color": [
+                                "match",
+                                ["get", "class"],
+                                "residential", "#e8e4db",
+                                "commercial", "#f2dede",
+                                "industrial", "#ebdbe8",
+                                "grass", "#d8e8c8",
+                                "park", "#c8e6c8",
+                                "forest", "#b8d8a8",
+                                "wood", "#b8d8a8",
+                                "cemetery", "#d8e0d0",
+                                "sand", "#f5e9c6",
+                                "#e8e4db"
+                            ],
+                            "fill-opacity": 0.6
+                        }
+                    },
+                    // Landcover (Natürliche Oberflächen)
+                    {
+                        id: "landcover",
+                        type: "fill",
+                        source: "offline-tiles",
+                        "source-layer": "landcover",
+                        paint: {
+                            "fill-color": [
+                                "match",
+                                ["get", "class"],
+                                "grass", "#d8e8c8",
+                                "forest", "#b8d8a8",
+                                "wood", "#b8d8a8",
+                                "ice", "#e8f4f8",
+                                "sand", "#f5e9c6",
+                                "#e8e4db"
+                            ],
+                            "fill-opacity": 0.4
+                        }
+                    },
+                    // Parks
+                    {
+                        id: "park",
+                        type: "fill",
+                        source: "offline-tiles",
+                        "source-layer": "park",
+                        paint: {
+                            "fill-color": "#c8e6c8",
+                            "fill-opacity": 0.6
+                        }
+                    },
+                    // Gebäude
+                    {
+                        id: "building",
+                        type: "fill",
+                        source: "offline-tiles",
+                        "source-layer": "building",
+                        paint: {
+                            "fill-color": "#d9d0c9",
+                            "fill-outline-color": "#b8b0a8",
+                            "fill-opacity": [
+                                "interpolate", ["linear"], ["zoom"],
+                                14, 0,
+                                15, 0.7
+                            ]
+                        }
+                    },
+                    // Straßen - Autobahnen
+                    {
+                        id: "road-motorway",
+                        type: "line",
+                        source: "offline-tiles",
+                        "source-layer": "transportation",
+                        filter: ["==", ["get", "class"], "motorway"],
+                        paint: {
+                            "line-color": "#fc8",
+                            "line-width": [
+                                "interpolate", ["exponential", 1.5], ["zoom"],
+                                5, 0.8,
+                                10, 2,
+                                14, 5,
+                                18, 10
+                            ]
+                        }
+                    },
+                    // Straßen - Hauptstraßen
+                    {
+                        id: "road-trunk-primary",
+                        type: "line",
+                        source: "offline-tiles",
+                        "source-layer": "transportation",
+                        filter: ["in", ["get", "class"], ["literal", ["trunk", "primary"]]],
+                        paint: {
+                            "line-color": "#fea",
+                            "line-width": [
+                                "interpolate", ["exponential", 1.5], ["zoom"],
+                                5, 0.6,
+                                10, 1.5,
+                                14, 4,
+                                18, 8
+                            ]
+                        }
+                    },
+                    {
+                        "id": "ford_fill",
+                        "type": "line",
+                        "source": "offline-tiles",
+                        "source-layer": "transportation",
+                        "minzoom": 10.0,
+                        "layout": {
+                            "line-cap": "butt",
+                            "line-join": "round",
+                            "visibility": "visible"
+                        },
+                        "paint": {
+                            "line-blur": {
+                                "stops": [
+                                    [
+                                        8,
+                                        0.4
+                                    ],
+                                    [
+                                        14,
+                                        0.1
+                                    ]
+                                ]
+                            },
+                            "line-color": "rgb(255, 255, 255)",
+                            "line-width": [
+                                "interpolate",
+                                [
+                                    "exponential",
+                                    2
+                                ],
+                                [
+                                    "zoom"
+                                ],
+                                13,
+                                2.5,
+                                15,
+                                3,
+                                16,
+                                6,
+                                20,
+                                101
+                            ],
+                            "line-opacity": [
+                                "match",
+                                [
+                                    "get",
+                                    "class"
+                                ],
+                                [
+                                    "motorway_construction",
+                                    "trunk_construction",
+                                    "primary_construction",
+                                    "secondary_construction",
+                                    "tertiary_construction",
+                                    "minor_construction",
+                                    "track_construction",
+                                    "path_construction",
+                                    "service_construction",
+                                    "via_ferrata_construction",
+                                    "rail_construction",
+                                    "transit_construction"
+                                ],
+                                0.5,
+                                1
+                            ]
+                        },
+                        "filter": [
+                            "all",
+                            [
+                                "has",
+                                "brunnel"
+                            ],
+                            [
+                                "==",
+                                "brunnel",
+                                "ford"
+                            ]
+                        ]
+                    },
+                    // Straßen - Nebenstraßen
+                    {
+                        id: "road-secondary-tertiary",
+                        type: "line",
+                        source: "offline-tiles",
+                        "source-layer": "transportation",
+                        filter: ["in", ["get", "class"], ["literal", ["secondary", "tertiary"]]],
+                        paint: {
+                            "line-color": "#fff",
+                            "line-width": [
+                                "interpolate", ["exponential", 1.5], ["zoom"],
+                                10, 0.8,
+                                14, 2.5,
+                                18, 6
+                            ]
+                        }
+                    },
+                    // Straßen - Kleine Straßen
+                    {
+                        id: "road-minor",
+                        type: "line",
+                        source: "offline-tiles",
+                        "source-layer": "transportation",
+                        filter: ["in", ["get", "class"], ["literal", ["minor", "service"]]],
+                        minzoom: 12,
+                        paint: {
+                            "line-color": "#fff",
+                            "line-width": [
+                                "interpolate", ["exponential", 1.5], ["zoom"],
+                                12, 0.5,
+                                14, 1.5,
+                                18, 4
+                            ]
+                        }
+                    },
+                    // Straßen - Pfade
+                    {
+                        id: "road-path",
+                        type: "line",
+                        source: "offline-tiles",
+                        "source-layer": "transportation",
+                        filter: ["==", ["get", "class"], "path"],
+                        minzoom: 14,
+                        paint: {
+                            "line-color": "#d4a574",
+                            "line-width": 1,
+                            "line-dasharray": [2, 2]
+                        }
+                    },
+                    // Grenzen
+                    {
+                        id: "boundary",
+                        type: "line",
+                        source: "offline-tiles",
+                        "source-layer": "boundary",
+                        filter: ["==", ["get", "admin_level"], 2],
+                        paint: {
+                            "line-color": "#8b7a9a",
+                            "line-width": 2,
+                            "line-dasharray": [3, 3]
+                        }
+                    },
+                    // Ortsnamen - Städte
+                    {
+                        id: "place-city",
+                        type: "symbol",
+                        source: "offline-tiles",
+                        "source-layer": "place",
+                        filter: ["==", ["get", "class"], "city"],
+                        layout: {
+                            "text-field": ["get", "name"],
+                            "text-font": ["Open Sans Bold"],
+                            "text-size": 14,
+                            "text-anchor": "center"
+                        },
+                        paint: {
+                            "text-color": "#333",
+                            "text-halo-color": "#fff",
+                            "text-halo-width": 2
+                        }
+                    },
+                    // Ortsnamen - Dörfer
+                    {
+                        id: "place-town-village",
+                        type: "symbol",
+                        source: "offline-tiles",
+                        "source-layer": "place",
+                        filter: ["in", ["get", "class"], ["literal", ["town", "village"]]],
+                        minzoom: 10,
+                        layout: {
+                            "text-field": ["get", "name"],
+                            "text-font": ["Open Sans Regular"],
+                            "text-size": 11,
+                            "text-anchor": "center"
+                        },
+                        paint: {
+                            "text-color": "#555",
+                            "text-halo-color": "#fff",
+                            "text-halo-width": 1.5
+                        }
+                    },
+                    // Straßennamen
+                    {
+                        id: "road-label",
+                        type: "symbol",
+                        source: "offline-tiles",
+                        "source-layer": "transportation_name",
+                        minzoom: 13,
+                        layout: {
+                            "text-field": ["get", "name"],
+                            "text-font": ["Open Sans Regular"],
+                            "text-size": 10,
+                            "symbol-placement": "line",
+                            "text-rotation-alignment": "map"
+                        },
+                        paint: {
+                            "text-color": "#666",
+                            "text-halo-color": "#fff",
+                            "text-halo-width": 1
+                        }
+                    }
+                ],
+                glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf"
+            });
+
+            // Drone-Path erneut hinzufügen nach Style-Wechsel
+            map.once('styledata', () => {
+                if (!map.getSource('drone-path')) {
+                    map.addSource('drone-path', {
+                        type: 'geojson',
+                        data: {
+                            type: 'Feature',
+                            geometry: {
+                                type: 'LineString',
+                                coordinates: []
+                            }
+                        }
+                    });
+
+                    map.addLayer({
+                        id: 'drone-line',
+                        type: 'line',
+                        source: 'drone-path',
+                        paint: {
+                            'line-color': '#ff0000',
+                            'line-width': 3
+                        }
+                    });
+                }
+
+                // Event-Listener für Cache-Management einrichten
+                setupMapEventListeners();
+            });
+
+            console.log("Switched to offline mode with custom protocol");
+        }
+
+        // Neue Funktion: Offline-Modus mit Style JSON von C# setzen (nicht verwendet, behalten für später)
+        function setOfflineModeWithStyle(styleJsonString) {
+            if (!map) {
+                console.error('setOfflineModeWithStyle: map is null');
+                return;
+            }
+
+            console.log('Setting offline mode with style from C#...');
+
+            // Cache leeren beim Setzen des Offline-Modus
+            tileCache = {};
+            console.log("Tile cache cleared for offline mode");
+
+            try {
+                // Custom protocol für Offline-Tiles (unterstützt sowohl Promise als auch Callback)
+                maplibregl.addProtocol('mbtiles', (params, callback) => {
+                    const url = params.url;
+                    console.log('Protocol handler called for:', url, 'callback:', typeof callback);
+
+                    // URL format: mbtiles://z/x/y
+                    const match = url.match(/mbtiles:\/\/(\d+)\/(\d+)\/(\d+)/);
+
+                    if (!match) {
+                        const error = new Error('Invalid mbtiles URL: ' + url);
+                        console.error(error);
+                        if (typeof callback === 'function') {
+                            callback(error);
+                            return { cancel: () => { } };
+                        }
+                        return Promise.reject(error);
+                    }
+
+                    const z = parseInt(match[1]);
+                    const x = parseInt(match[2]);
+                    const y = parseInt(match[3]);
+                    const cacheKey = z + '/' + x + '/' + y;
+
+                    console.log('Requesting tile:', cacheKey);
+
+                    // Prüfe Cache
+                    if (tileCache[cacheKey]) {
+                        console.log('Tile found in cache:', cacheKey);
+                        const data = tileCache[cacheKey];
+                        if (typeof callback === 'function') {
+                            callback(null, data, null, null);
+                            return { cancel: () => { } };
+                        }
+                        return Promise.resolve({ data: data });
+                    }
+
+                    // Bestimme ob Callback- oder Promise-Modus
+                    const isCallbackMode = typeof callback === 'function';
+                    console.log('Request mode:', isCallbackMode ? 'callback' : 'promise');
+
+                    // Tile von C# anfordern
+                    const promise = requestTileFromCSharp(z, x, y)
+                        .then(dataUrl => {
+                            console.log('Received tile data for', cacheKey, 'length:', dataUrl ? dataUrl.length : 0);
+                            if (dataUrl && dataUrl !== 'null') {
+                                try {
+                                    // Base64 zu ArrayBuffer konvertieren
+                                    if (!dataUrl.includes(',')) {
+                                        throw new Error('Invalid data URL format - no comma found');
+                                    }
+                                    const base64 = dataUrl.split(',')[1];
+                                    if (!base64) {
+                                        throw new Error('Invalid data URL format - no base64 data after comma');
+                                    }
+                                    console.log('Base64 data length:', base64.length);
+
+                                    const binary = atob(base64);
+                                    console.log('Binary length:', binary.length);
+
+                                    const bytes = new Uint8Array(binary.length);
+                                    for (let i = 0; i < binary.length; i++) {
+                                        bytes[i] = binary.charCodeAt(i);
+                                    }
+                                    const buffer = bytes.buffer;
+                                    tileCache[cacheKey] = buffer;
+
+                                    console.log('Tile converted to buffer:', cacheKey, 'size:', buffer.byteLength);
+
+                                    if (isCallbackMode) {
+                                        callback(null, buffer, null, null);
+                                        return buffer;
+                                    }
+                                    return { data: buffer };
+                                } catch (conversionError) {
+                                    console.error('Error converting tile data:', conversionError);
+                                    console.error('dataUrl preview:', dataUrl.substring(0, 100));
+                                    const error = new Error('Tile conversion failed for ' + cacheKey + ': ' + conversionError.message);
+                                    if (isCallbackMode) {
+                                        callback(error);
+                                        return null;
+                                    }
+                                    return Promise.reject(error);
+                                }
+                            } else {
+                                const error = new Error('Tile not found: ' + cacheKey);
+                                console.warn(error);
+                                if (isCallbackMode) {
+                                    callback(error);
+                                    return null;
+                                }
+                                return Promise.reject(error);
+                            }
+                        })
+                        .catch(err => {
+                            console.error('Error loading tile', cacheKey, ':', err);
+                            if (isCallbackMode) {
+                                callback(err);
+                                return null;
+                            }
+                            return Promise.reject(err);
+                        });
+
+                    if (isCallbackMode) {
+                        return { cancel: () => { } };
+                    }
+                    return promise;
+                });
+
+                console.log('Protocol handler registered successfully');
+
+                // Parse Style JSON von C#
+                try {
+                    const style = JSON.parse(styleJsonString);
+                    console.log('Style loaded from C#, layers:', style.layers ? style.layers.length : 0);
+                    map.setStyle(style);
+
+                    // Drone-Path erneut hinzufügen nach Style-Wechsel
+                    map.once('styledata', () => {
+                        console.log('Style data loaded, adding drone-path source');
+                        if (!map.getSource('drone-path')) {
+                            map.addSource('drone-path', {
+                                type: 'geojson',
+                                data: {
+                                    type: 'Feature',
+                                    geometry: {
+                                        type: 'LineString',
+                                        coordinates: []
+                                    }
+                                }
+                            });
+
+                            map.addLayer({
+                                id: 'drone-line',
+                                type: 'line',
+                                source: 'drone-path',
+                                paint: {
+                                    'line-color': '#ff0000',
+                                    'line-width': 3
+                                }
+                            });
+                            console.log('Drone path layer added after style load');
+                        }
+
+                        // Debug: Zeige verfügbare Source-Layer
+                        debugAvailableSourceLayers();
+
+                        // Event-Listener für Cache-Management einrichten
+                        setupMapEventListeners();
+                    });
+                } catch (parseError) {
+                    console.error('Error parsing style JSON from C#:', parseError);
+                }
+            } catch (error) {
+                console.error('Error in setOfflineModeWithStyle:', error);
+            }
+
+            console.log("Switched to offline mode with style from C#");
+        }
+
+        // Promise-basierte Tile-Anfrage an C#
+        let pendingTileRequests = {};
+        let tileRequestId = 0;
+
+        function requestTileFromCSharp(z, x, y) {
+            return new Promise((resolve, reject) => {
+                const id = tileRequestId++;
+                console.log('requestTileFromCSharp: ID=' + id + ', z=' + z + ', x=' + x + ', y=' + y);
+
+                // Timeout nach 10 Sekunden
+                const timeoutId = setTimeout(() => {
+                    if (pendingTileRequests[id]) {
+                        console.error('Tile request timeout for ID=' + id);
+                        delete pendingTileRequests[id];
+                        reject(new Error('Tile request timeout for z=' + z + ',x=' + x + ',y=' + y));
+                    }
+                }, 10000);
+
+                pendingTileRequests[id] = { resolve, reject, timeoutId };
+
+                // Ruft C# auf (wird vom WebView abgefangen)
+                const url = 'tile://' + id + '/' + z + '/' + x + '/' + y;
+                console.log('Navigating to:', url);
+                window.location.href = url;
+            });
+        }
+
+        // Wird von C# aufgerufen um Tile-Daten zu liefern
+        function receiveTile(id, dataUrl) {
+            console.log('receiveTile called: ID=' + id + ', dataUrl length=' + (dataUrl ? dataUrl.length : 0));
+            if (pendingTileRequests[id]) {
+                clearTimeout(pendingTileRequests[id].timeoutId);
+                pendingTileRequests[id].resolve(dataUrl);
+                delete pendingTileRequests[id];
+                console.log('Tile request resolved for ID=' + id);
+            } else {
+                console.warn('receiveTile: No pending request found for ID=' + id);
+            }
+        }
+
+        // Funktion zum Updaten aus MAUI
+        function updatePath(coords) {
+            if (map && map.getSource('drone-path')) {
+                map.getSource('drone-path').setData({
+                    type: 'Feature',
+                    geometry: {
+                        type: 'LineString',
+                        coordinates: coords
+                    }
+                });
+            }
+        }
+
+        // Funktion zum manuellen Leeren des Tile-Caches
+        function clearTileCache() {
+            const cacheSize = Object.keys(tileCache).length;
+            tileCache = {};
+            console.log('Cleared ' + cacheSize + ' tiles from cache');
+        }
+
+        // Exportiere Layer-Info als JSON für C# (kann von C# aufgerufen werden)
+        function getAvailableSourceLayers() {
+            if (!map || !map.style) {
+                return JSON.stringify({ error: 'Map not initialized' });
+            }
+
+            const sourceCaches = map.style.sourceCaches['offline-tiles'];
+            if (!sourceCaches || !sourceCaches._tiles) {
+                return JSON.stringify({ error: 'No tiles loaded yet' });
+            }
+
+            const layerInfo = {};
+            const tiles = sourceCaches._tiles;
+
+            for (const tileId in tiles) {
+                const tile = tiles[tileId];
+                if (tile.vectorTileFeatures) {
+                    for (const layerName in tile.vectorTileFeatures) {
+                        if (!layerInfo[layerName]) {
+                            layerInfo[layerName] = {
+                                featureCount: 0,
+                                sampleProperties: null
+                            };
+                        }
+
+                        const features = tile.vectorTileFeatures[layerName];
+                        layerInfo[layerName].featureCount += features.length;
+
+                        // Nehme Properties vom ersten Feature als Beispiel
+                        if (!layerInfo[layerName].sampleProperties && features.length > 0) {
+                            const feature = features[0];
+                            if (feature.properties) {
+                                layerInfo[layerName].sampleProperties = feature.properties;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return JSON.stringify({
+                layers: Object.keys(layerInfo).sort(),
+                details: layerInfo,
+                tileCount: Object.keys(tiles).length
+            }, null, 2);
+        }
+
+        // Event-Listener für Move-Ende - Cache alter Tiles wenn zu viele im Speicher
+        let lastCleanupTime = Date.now();
+        let lastMoveTime = Date.now();
+
+        function setupMapEventListeners() {
+            if (!map) return;
+
+            map.on('moveend', () => {
+                const now = Date.now();
+
+                // Wenn mehr als 2 Sekunden seit dem letzten Move vergangen sind
+                // Source Cache aufräumen um alte Tiles zu entfernen
+                if (now - lastMoveTime > 2000) {
+                    if (map.style && map.style.sourceCaches && map.style.sourceCaches['offline-tiles']) {
+                        const sourceCache = map.style.sourceCaches['offline-tiles'];
+                        if (sourceCache && sourceCache._cache) {
+                            // Lösche nur Tiles die nicht im aktuellen Viewport sind
+                            const sourceCacheId = 'offline-tiles';
+                            if (sourceCache._coveredTiles) {
+                                sourceCache._coveredTiles = {};
+                            }
+                        }
+                    }
+                }
+                lastMoveTime = now;
+
+                // Cleanup alle 60 Sekunden
+                if (now - lastCleanupTime > 60000) {
+                    const cacheSize = Object.keys(tileCache).length;
+                    // Wenn mehr als 300 Tiles im Cache, alte entfernen
+                    if (cacheSize > 300) {
+                        console.log('Cache has ' + cacheSize + ' tiles, cleaning up...');
+                        // Behalte nur die letzten 150 Tiles
+                        const keys = Object.keys(tileCache);
+                        const toDelete = keys.slice(0, keys.length - 150);
+                        toDelete.forEach(key => delete tileCache[key]);
+                        console.log('Deleted ' + toDelete.length + ' old tiles from cache');
+                    }
+                    lastCleanupTime = now;
+                }
+            });
+        }
+
+        // Drone und Operator Marker Management
+        let droneMarkers = {};
+        let operatorMarkers = {};
+        let selectedDroneId = null;
+        let operatorLines = {}; // Linien zwischen Drohne und Operator
+
+        // Stelle inaktive Styles nach Scroll wieder her
+        function restoreInactiveStyles() {
+            // Drohnen
+            for (const nodeId in droneMarkers) {
+                const marker = droneMarkers[nodeId];
+                if (marker.inactive) {
+                    marker.element.style.setProperty('opacity', '0.4', 'important');
+                    marker.element.style.setProperty('filter', 'grayscale(100%)', 'important');
+                }
+            }
+
+            // Operatoren
+            for (const nodeId in operatorMarkers) {
+                const marker = operatorMarkers[nodeId];
+                if (marker.inactive) {
+                    marker.element.style.setProperty('opacity', '0.4', 'important');
+                    marker.element.style.setProperty('filter', 'grayscale(100%)', 'important');
+                }
+            }
+        }
+
+        function addDroneMarker(nodeId, lon, lat, name, altitude, speed, heading, operatorId) {
+            if (!map) return;
+
+            // Erstelle oder aktualisiere Marker
+            if (!droneMarkers[nodeId]) {
+                // Neuer Marker mit Custom Icon
+                const el = document.createElement('div');
+                el.className = 'drone-marker';
+                el.title = name;
+
+                // Click Handler
+                el.addEventListener('click', function () {
+                    showDroneOverlay(nodeId);
+                });
+
+                const marker = new maplibregl.Marker({
+                    element: el,
+                    anchor: 'center'
+                })
+                    .setLngLat([lon, lat])
+                    .addTo(map);
+
+                droneMarkers[nodeId] = {
+                    marker: marker,
+                    element: el,
+                    operatorId: operatorId || 0,
+                    inactive: false,
+                    data: { name: name, lon: lon, lat: lat, altitude: altitude, speed: speed, heading: heading }
+                };
+            } else {
+                // Aktualisiere Position und Daten
+                droneMarkers[nodeId].marker.setLngLat([lon, lat]);
+                droneMarkers[nodeId].data = { name: name, lon: lon, lat: lat, altitude: altitude, speed: speed, heading: heading };
+                droneMarkers[nodeId].operatorId = operatorId || 0;
+
+                // Stelle sicher, dass inaktive Styles erhalten bleiben
+                if (droneMarkers[nodeId].inactive) {
+                    droneMarkers[nodeId].element.style.setProperty('opacity', '0.4', 'important');
+                    droneMarkers[nodeId].element.style.setProperty('filter', 'grayscale(100%)', 'important');
+                }
+
+                // Wenn dieser Marker im Overlay angezeigt wird, aktualisiere das Overlay sofort
+                if (selectedDroneId === nodeId) {
+                    updateDroneOverlay(nodeId);
+                }
+            }
+
+            // Zeichne Linie zum Operator
+            updateOperatorLine(nodeId);
+        }
+
+        function setDroneInactive(nodeId, inactive) {
+            if (!droneMarkers[nodeId]) return;
+
+            const el = droneMarkers[nodeId].element;
+            droneMarkers[nodeId].inactive = inactive;
+
+            if (inactive) {
+                el.style.setProperty('opacity', '0.4', 'important');
+                el.style.setProperty('filter', 'grayscale(100%)', 'important');
+            } else {
+                el.style.setProperty('opacity', '1', 'important');
+                el.style.setProperty('filter', 'none', 'important');
+            }
+        }
+
+        function removeDroneMarker(nodeId) {
+            if (!droneMarkers[nodeId]) return;
+
+            droneMarkers[nodeId].marker.remove();
+            delete droneMarkers[nodeId];
+
+            // Entferne Linie zum Operator
+            removeOperatorLine(nodeId);
+
+            // Schließe Overlay falls offen
+            if (selectedDroneId === nodeId) {
+                closeDroneOverlay();
+            }
+        }
+
+        function updateOperatorLine(droneNodeId) {
+            if (!droneMarkers[droneNodeId]) return;
+
+            const drone = droneMarkers[droneNodeId];
+            const operatorId = drone.operatorId;
+
+            // Entferne alte Linie
+            removeOperatorLine(droneNodeId);
+
+            if (operatorId && operatorId !== 0 && operatorMarkers[operatorId]) {
+                const operator = operatorMarkers[operatorId];
+                const dronePos = drone.data;
+                const operatorPos = operator.data;
+
+                const sourceId = 'operator-line-' + droneNodeId;
+
+                // Erstelle GeoJSON für Linie
+                if (!map.getSource(sourceId)) {
+                    map.addSource(sourceId, {
+                        type: 'geojson',
+                        data: {
+                            type: 'Feature',
+                            geometry: {
+                                type: 'LineString',
+                                coordinates: [
+                                    [operatorPos.lon, operatorPos.lat],
+                                    [dronePos.lon, dronePos.lat]
+                                ]
+                            }
+                        }
+                    });
+
+                    map.addLayer({
+                        id: 'operator-line-layer-' + droneNodeId,
+                        type: 'line',
+                        source: sourceId,
+                        paint: {
+                            'line-color': '#4488ff',
+                            'line-width': 2,
+                            'line-dasharray': [2, 2],
+                            'line-opacity': 0.6
+                        }
+                    });
+                } else {
+                    map.getSource(sourceId).setData({
+                        type: 'Feature',
+                        geometry: {
+                            type: 'LineString',
+                            coordinates: [
+                                [operatorPos.lon, operatorPos.lat],
+                                [dronePos.lon, dronePos.lat]
+                            ]
+                        }
+                    });
+                }
+            }
+        }
+
+        function removeOperatorLine(droneNodeId) {
+            const layerId = 'operator-line-layer-' + droneNodeId;
+            const sourceId = 'operator-line-' + droneNodeId;
+
+            if (map.getLayer(layerId)) {
+                map.removeLayer(layerId);
+            }
+            if (map.getSource(sourceId)) {
+                map.removeSource(sourceId);
+            }
+        }
+
+        function addOperatorMarker(nodeId, lon, lat, name) {
+            if (!map) return;
+
+            // Erstelle oder aktualisiere Marker
+            if (!operatorMarkers[nodeId]) {
+                // Neuer Marker mit Custom Icon
+                const el = document.createElement('div');
+                el.className = 'operator-marker';
+                el.title = name;
+
+                const marker = new maplibregl.Marker({ element: el })
+                    .setLngLat([lon, lat])
+                    .addTo(map);
+
+                operatorMarkers[nodeId] = {
+                    marker: marker,
+                    element: el,
+                    inactive: false,
+                    data: { name: name, lon: lon, lat: lat }
+                };
+            } else {
+                // Aktualisiere Position und Daten
+                operatorMarkers[nodeId].marker.setLngLat([lon, lat]);
+                operatorMarkers[nodeId].data = { name: name, lon: lon, lat: lat };
+
+                // Stelle sicher, dass inaktive Styles erhalten bleiben
+                if (operatorMarkers[nodeId].inactive) {
+                    operatorMarkers[nodeId].element.style.setProperty('opacity', '0.4', 'important');
+                    operatorMarkers[nodeId].element.style.setProperty('filter', 'grayscale(100%)', 'important');
+                }
+            }
+
+            // Aktualisiere alle Linien zu diesem Operator
+            for (const droneId in droneMarkers) {
+                if (droneMarkers[droneId].operatorId === nodeId) {
+                    updateOperatorLine(parseInt(droneId));
+                }
+            }
+        }
+
+        function removeOperatorMarker(nodeId) {
+            if (!operatorMarkers[nodeId]) return;
+
+            operatorMarkers[nodeId].marker.remove();
+            delete operatorMarkers[nodeId];
+
+            // Entferne alle Linien zu diesem Operator
+            for (const droneId in droneMarkers) {
+                if (droneMarkers[droneId].operatorId === nodeId) {
+                    removeOperatorLine(parseInt(droneId));
+                }
+            }
+        }
+
+        function setOperatorInactive(nodeId, inactive) {
+            if (!operatorMarkers[nodeId]) return;
+
+            const el = operatorMarkers[nodeId].element;
+            operatorMarkers[nodeId].inactive = inactive;
+
+            if (inactive) {
+                el.style.setProperty('opacity', '0.4', 'important');
+                el.style.setProperty('filter', 'grayscale(100%)', 'important');
+            } else {
+                el.style.setProperty('opacity', '1', 'important');
+                el.style.setProperty('filter', 'none', 'important');
+            }
+        }
+
+        function showDroneOverlay(nodeId) {
+            if (!droneMarkers[nodeId]) return;
+
+            selectedDroneId = nodeId;
+
+            const overlay = document.getElementById('drone-overlay');
+            const data = droneMarkers[nodeId].data;
+            document.getElementById('overlay-title').textContent = data.name;
+
+            updateDroneOverlay(nodeId);
+
+            overlay.classList.add('visible');
+        }
+
+        function updateDroneOverlay(nodeId) {
+            if (!droneMarkers[nodeId]) return;
+
+            const data = droneMarkers[nodeId].data;
+
+            document.getElementById('overlay-position').textContent =
+                data.lat.toFixed(6) + ', ' + data.lon.toFixed(6);
+            document.getElementById('overlay-altitude').textContent =
+                data.altitude + ' m';
+            document.getElementById('overlay-speed').textContent =
+                data.speed.toFixed(1) + ' km/h';
+            document.getElementById('overlay-heading').textContent =
+                data.heading.toFixed(0) + '°';
+        }
+
+        function closeDroneOverlay() {
+            const overlay = document.getElementById('drone-overlay');
+            overlay.classList.remove('visible');
+            selectedDroneId = null;
+        }
+
+        let userMarker = null;
+
+        function setUserLocation(lon, lat) {
+            if (!map) return;
+
+            // Marker setzen oder aktualisieren
+            if (userMarker == null) {
+                userMarker = new maplibregl.Marker({ color: "blue" })
+                    .setLngLat([lon, lat])
+                    .addTo(map);
+            } else {
+                userMarker.setLngLat([lon, lat]);
+            }
+
+            // Karte auf Standort zentrieren
+            map.flyTo({
+                center: [lon, lat],
+                zoom: 15
+            });
+        }
+
+        function updateBattery(level) {
+            console.log('updateBattery called with level=' + level);
+
+            const indicator = document.getElementById('battery-indicator');
+            const icon = document.getElementById('battery-icon');
+            const levelText = document.getElementById('battery-level');
+
+            if (!indicator || !icon || !levelText) {
+                console.error('Battery elements not found');
+                return;
+            }
+
+            // Zeige Indicator
+            indicator.classList.add('visible');
+
+            // Update Text
+            levelText.textContent = level + '%';
+
+            // Update Icon und Klasse basierend auf Level
+            indicator.classList.remove('low', 'critical');
+
+            if (level >= 80) {
+                icon.textContent = '🔋'; // Voll
+            } else if (level >= 50) {
+                icon.textContent = '🔋'; // Mittel
+            } else if (level >= 20) {
+                icon.textContent = '🔋'; // Niedrig
+                indicator.classList.add('low');
+            } else {
+                icon.textContent = '🪫'; // Kritisch
+                indicator.classList.add('critical');
+            }
+
+            console.log('Battery updated to ' + level + '%');
+        }
+
+        function hideBattery() {
+            const indicator = document.getElementById('battery-indicator');
+            if (indicator) {
+                indicator.classList.remove('visible');
+            }
+        }
+
+        // Standard: Online-Modus (wird von C# überschrieben)
+        loadMapLibre(false);
+    </script>
+</body>
+</html>

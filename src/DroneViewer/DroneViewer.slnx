@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="DroneViewer/DroneViewer.csproj">
+    <Deploy />
+  </Project>
+</Solution>
