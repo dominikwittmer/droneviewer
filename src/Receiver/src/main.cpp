@@ -288,7 +288,7 @@ bool parse_serial_injected_uav(const String &payload, uav_data *out)
   payload.toCharArray(buffer, sizeof(buffer));
 
   // INJECT format:
-  // INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> [base_lat] [base_lon] [uav_id]
+  // INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> <rssi> [base_lat] [base_lon] [uav_id] [op_id]
   char *savePtr = nullptr;
   char *token = strtok_r(buffer, " ", &savePtr);
   if (token == nullptr)
@@ -328,6 +328,11 @@ bool parse_serial_injected_uav(const String &payload, uav_data *out)
   parsed.speed = (int)strtol(token, nullptr, 10);
 
   token = strtok_r(nullptr, " ", &savePtr);
+  if (token == nullptr)
+    return false;
+  parsed.rssi = (int)strtol(token, nullptr, 10);
+
+  token = strtok_r(nullptr, " ", &savePtr);
   if (token != nullptr)
   {
     parsed.base_lat_d = strtod(token, nullptr);
@@ -347,6 +352,11 @@ bool parse_serial_injected_uav(const String &payload, uav_data *out)
       token++;
     }
     strncpy(parsed.uav_id, token, ODID_ID_SIZE);
+    token = strtok_r(nullptr, " ", &savePtr);
+    if (token != nullptr)
+    {
+      strncpy(parsed.op_id, token, ODID_ID_SIZE);
+    }
   }
   else
   {
@@ -421,8 +431,8 @@ static void update_battery_level(unsigned long current_millis)
 {
   if (!pBatteryLevelCharacteristic)
     return;
-  if ((current_millis - last_battery_update) < 10000UL)
-    return; // alle 10s
+  if ((current_millis - last_battery_update) < 30000UL)
+    return; // alle 30s
   last_battery_update = current_millis;
 
   float soc = maxlipo.cellPercent();
@@ -669,7 +679,7 @@ void handle_serial_command(const String &cmd)
   if (cmd.equalsIgnoreCase("HELP"))
   {
     Serial.println("Commands: HELP | PASSKEY <6digits> | SHOWPASS");
-    Serial.println("INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> [base_lat] [base_lon] [uav_id]");
+    Serial.println("INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> <rssi> [base_lat] [base_lon] [uav_id] [op_id]");
     return;
   }
 
@@ -706,8 +716,8 @@ void handle_serial_command(const String &cmd)
 
   if (cmd.equalsIgnoreCase("INJECT"))
   {
-    Serial.println("Usage: INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> [base_lat] [base_lon] [uav_id]");
-    Serial.println("Example: INJECT aa:bb:cc:dd:ee:ff 52.5208 13.4095 120 180 15 52.5200 13.4050 TEST-UAV");
+    Serial.println("Usage: INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> <rssi> [base_lat] [base_lon] [uav_id] [op_id]");
+    Serial.println("Example: INJECT aa:bb:cc:dd:ee:ff 46.828929 9.437259 120 180 15 -65 46.826941 9.435680 TEST-UAV OPERATOR-1");
     return;
   }
 
@@ -720,7 +730,7 @@ void handle_serial_command(const String &cmd)
     if (!parse_serial_injected_uav(payload, &injected))
     {
       Serial.println("Invalid INJECT payload.");
-      Serial.println("Usage: INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> [base_lat] [base_lon] [uav_id]");
+      Serial.println("Usage: INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> <rssi> [base_lat] [base_lon] [uav_id] [op_id]");
       return;
     }
 
@@ -795,7 +805,21 @@ void send_json_fast(const uav_data *UAV, const char *extra_fields)
   {
     source = "WiFi";
   }
+  
   send_waypoint_notifications(UAV, source);
+}
+
+char* replaceSpace(char *input)  // Accept non-const pointer
+{
+  if (input == nullptr)
+    return input;
+  
+  for (size_t i = 0; input[i] != '\0'; i++)  // Iterate until null terminator
+  {
+    if (input[i] == ' ')
+      input[i] = '_';
+  }
+  return input;
 }
 
 void send_waypoint_notifications(const uav_data *UAV, const char *source)
@@ -816,11 +840,25 @@ void send_waypoint_notifications(const uav_data *UAV, const char *source)
     int32_t base_lat_e7 = deg_to_e7(UAV->base_lat_d);
     int32_t base_lon_e7 = deg_to_e7(UAV->base_long_d);
 
+    // Create local copies and replace spaces
+    char uav_id_copy[ODID_ID_SIZE + 1] = {0};
+    char op_id_copy[ODID_ID_SIZE + 1] = {0};
+    
+    if (UAV->uav_id[0]) {
+      strncpy(uav_id_copy, UAV->uav_id, ODID_ID_SIZE);
+      replaceSpace(uav_id_copy);
+    }
+    
+    if (UAV->op_id[0]) {
+      strncpy(op_id_copy, UAV->op_id, ODID_ID_SIZE);
+      replaceSpace(op_id_copy);
+    }    
+
     snprintf(payload, sizeof(payload),
-             "{\"type\":\"waypoint\",\"role\":\"drone\",\"source\":\"%s\",\"mac\":\"%s\",\"waypoint\":{\"id\":\"drone_%02x%02x%02x%02x%02x%02x\",\"Drone\":\"%s\",\"latitudeI\":%ld,\"longitudeI\":%ld,\"altitude\":%d,\"heading\":%d,\"speed\":%d,\"base_latitudeI\":%ld,\"base_longitudeI\":%ld, \"base_valid\":%d}}",
-             source, mac_str, UAV->mac[0], UAV->mac[1], UAV->mac[2], UAV->mac[3], UAV->mac[4], UAV->mac[5],
-             UAV->uav_id[0] ? UAV->uav_id : mac_str,
-             (long)lat_e7, (long)lon_e7, UAV->altitude_msl, UAV->heading, UAV->speed, (long)base_lat_e7, (long)base_lon_e7, has_valid_base_coords ? 1 : 0);
+             "%s %s %s %ld %ld %d %d %d %d %s %ld %ld %d",
+             source, mac_str, UAV->uav_id[0] ? uav_id_copy : mac_str,
+             (long)lat_e7, (long)lon_e7, UAV->altitude_msl, UAV->heading, UAV->speed, UAV->rssi,
+             UAV->op_id[0] ? op_id_copy : mac_str, (long)base_lat_e7, (long)base_lon_e7, has_valid_base_coords ? 1 : 0);
     send_ble_notification(payload);
   }
 }
