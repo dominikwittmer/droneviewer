@@ -5,13 +5,21 @@
 
     <Grid RowDefinitions="Auto,*">
         <!-- Status Bar -->
-        <Frame Grid.Row="0" BackgroundColor="#2196F3" Padding="10" CornerRadius="0">
-            <Label x:Name="StatusLabel" 
-                   Text="⚡ Bereit" 
-                   TextColor="White" 
-                   FontSize="14"
-                   HorizontalOptions="Center"/>
-        </Frame>
+        <Border Grid.Row="0" BackgroundColor="#2196F3" Padding="10">
+            <Grid>
+                <Label x:Name="StatusLabel" 
+                       Text="⚡ Bereit" 
+                       TextColor="White" 
+                       FontSize="14"
+                       HorizontalOptions="Center"/>
+
+                <Label x:Name="BatteryLabel" 
+                       Text="🔋 ?" 
+                       TextColor="White" 
+                       FontSize="14"
+                       HorizontalOptions="End"/>
+            </Grid>
+        </Border>
 
         <!-- Map View -->
         <WebView x:Name="MapView" 
@@ -20,13 +28,14 @@
         <!-- Floating Action Buttons (Overlays) -->
         <VerticalStackLayout Grid.Row="1" 
                              Spacing="15" 
-                             Padding="20"
+                             Padding="20,20,20,50"
                              VerticalOptions="End"
                              HorizontalOptions="End">
 
             <!-- Scannen Button -->
             <Border BackgroundColor="#80000000"
                     StrokeThickness="0"
+                    HorizontalOptions="End"
                     WidthRequest="48"
                     HeightRequest="48">
                 <Border.StrokeShape>
@@ -38,10 +47,11 @@
                 <Border.GestureRecognizers>
                     <TapGestureRecognizer Tapped="OnScanClicked"/>
                 </Border.GestureRecognizers>
-                <Label Text="○ )"
+                <Label Text="bluetooth_searching"
+                       FontFamily="Material"
                        TextColor="White"
-                       FontSize="18"
-                       FontAttributes="Bold"
+                       FontSize="28"
+                       FontAttributes="None"
                        HorizontalOptions="Center"
                        VerticalOptions="Center"/>
             </Border>
@@ -49,6 +59,7 @@
             <!-- Trennen Button -->
             <Border BackgroundColor="#80000000"
                     StrokeThickness="0"
+                    HorizontalOptions="End"
                     WidthRequest="48"
                     HeightRequest="48">
                 <Border.StrokeShape>
@@ -60,10 +71,11 @@
                 <Border.GestureRecognizers>
                     <TapGestureRecognizer Tapped="OnDisconnectClicked"/>
                 </Border.GestureRecognizers>
-                <Label Text="✕"
+                <Label Text="bluetooth_disabled"
+                       FontFamily="Material"
                        TextColor="White"
-                       FontSize="22"
-                       FontAttributes="Bold"
+                       FontSize="28"
+                       FontAttributes="None"
                        HorizontalOptions="Center"
                        VerticalOptions="Center"/>
             </Border>
@@ -71,6 +83,7 @@
             <!-- Standort Button -->
             <Border BackgroundColor="#80000000"
                     StrokeThickness="0"
+                    HorizontalOptions="End"
                     WidthRequest="48"
                     HeightRequest="48">
                 <Border.StrokeShape>
@@ -82,10 +95,11 @@
                 <Border.GestureRecognizers>
                     <TapGestureRecognizer Tapped="OnLocationClicked"/>
                 </Border.GestureRecognizers>
-                <Label Text="◉"
+                <Label Text="location_searching"
+                       FontFamily="Material"
                        TextColor="White"
-                       FontSize="22"
-                       FontAttributes="Bold"
+                       FontSize="28"
+                       FontAttributes="None"
                        HorizontalOptions="Center"
                        VerticalOptions="Center"/>
             </Border>
@@ -93,6 +107,7 @@
             <!-- Drohnen Liste Button -->
             <Border BackgroundColor="#80000000"
                     StrokeThickness="0"
+                    HorizontalOptions="End"
                     WidthRequest="48"
                     HeightRequest="48">
                 <Border.StrokeShape>
@@ -104,10 +119,11 @@
                 <Border.GestureRecognizers>
                     <TapGestureRecognizer Tapped="OnDroneListClicked"/>
                 </Border.GestureRecognizers>
-                <Label Text="✈"
+                <Label Text="travel"
+                       FontFamily="Material"
                        TextColor="White"
-                       FontSize="20"
-                       FontAttributes="Bold"
+                       FontSize="28"
+                       FontAttributes="None"
                        HorizontalOptions="Center"
                        VerticalOptions="Center"/>
             </Border>
@@ -115,6 +131,7 @@
             <!-- Settings Button -->
             <Border BackgroundColor="#80000000"
                     StrokeThickness="0"
+                    HorizontalOptions="End"
                     WidthRequest="48"
                     HeightRequest="48">
                 <Border.StrokeShape>
@@ -126,29 +143,138 @@
                 <Border.GestureRecognizers>
                     <TapGestureRecognizer Tapped="OnSettingsClicked"/>
                 </Border.GestureRecognizers>
-                <Label Text="⚙"
+                <Label Text="settings"
+                       FontFamily="Material"
                        TextColor="White"
-                       FontSize="20"
+                       FontSize="28"
+                       FontAttributes="None"
                        HorizontalOptions="Center"
                        VerticalOptions="Center"/>
             </Border>
 
+            <Grid>
+
+                <!-- Ausklapp-Menü -->
+                <HorizontalStackLayout x:Name="LayerMenu"
+                           IsVisible="False"
+                           Spacing="8"
+                           HorizontalOptions="End"
+                           VerticalOptions="Center"
+                           Margin="0,0,60,0">
+
+                    <!-- OpenStreetMap -->
+                    <Border BackgroundColor="#80000000"
+            StrokeThickness="0"
+            WidthRequest="48"
+            HeightRequest="48"
+            HorizontalOptions="End">
+
+                        <Border.StrokeShape>
+                            <RoundRectangle CornerRadius="24"/>
+                        </Border.StrokeShape>
+
+                        <Border.Shadow>
+                            <Shadow Brush="Black"
+                    Offset="0,2"
+                    Radius="8"
+                    Opacity="0.3"/>
+                        </Border.Shadow>
+
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnOpenMapClicked"/>
+                        </Border.GestureRecognizers>
+
+                        <Label Text="language"
+                           FontFamily="Material"
+               TextColor="White"
+               FontSize="28"
+               HorizontalOptions="Center"
+               VerticalOptions="Center"/>
+                    </Border>
+
+                    <!-- SwissTopo -->
+                    <Border BackgroundColor="#80000000"
+            StrokeThickness="0"
+            WidthRequest="48"
+            HeightRequest="48"
+            HorizontalOptions="End">
+
+                        <Border.StrokeShape>
+                            <RoundRectangle CornerRadius="24"/>
+                        </Border.StrokeShape>
+
+                        <Border.Shadow>
+                            <Shadow Brush="Black"
+                    Offset="0,2"
+                    Radius="8"
+                    Opacity="0.3"/>
+                        </Border.Shadow>
+
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnSwissTopoClicked"/>
+                        </Border.GestureRecognizers>
+
+                        <Label Text="map"
+                           FontFamily="Material"
+               TextColor="White"
+               FontSize="28"
+               HorizontalOptions="Center"
+               VerticalOptions="Center"/>
+                    </Border>
+
+                </HorizontalStackLayout>
+
+                <!-- Karten layer Button -->
+                <Border BackgroundColor="#80000000"
+            StrokeThickness="0"
+            WidthRequest="48"
+            HeightRequest="48"
+            HorizontalOptions="End">
+
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="24"/>
+                    </Border.StrokeShape>
+
+                    <Border.Shadow>
+                        <Shadow Brush="Black"
+                    Offset="0,2"
+                    Radius="8"
+                    Opacity="0.3"/>
+                    </Border.Shadow>
+
+                    <Border.GestureRecognizers>
+                        <TapGestureRecognizer Tapped="OnLayerClicked"/>
+                    </Border.GestureRecognizers>
+
+                    <Label Text="layers"
+                           FontFamily="Material"
+               TextColor="White"
+               FontSize="28"
+               HorizontalOptions="Center"
+               VerticalOptions="Center"/>
+                </Border>
+
+            </Grid>
+
+
         </VerticalStackLayout>
 
         <!-- Drohnen Liste Overlay (anfangs versteckt) -->
-        <Frame Grid.Row="1"
+        <Border Grid.Row="1"
                x:Name="DroneListOverlay"
                BackgroundColor="White"
                Padding="0"
-               CornerRadius="12"
                IsVisible="False"
                WidthRequest="320"
                HeightRequest="400"
                HorizontalOptions="Center"
                VerticalOptions="Center">
-            <Frame.Shadow>
+            <Border.Shadow>
                 <Shadow Brush="Black" Offset="0,4" Radius="16" Opacity="0.4"/>
-            </Frame.Shadow>
+            </Border.Shadow>
+            <Border.StrokeShape>
+                <RoundRectangle CornerRadius="12,12,12,12" />
+            </Border.StrokeShape>
 
             <Grid RowDefinitions="Auto,*,Auto">
                 <!-- Header -->
@@ -187,7 +313,7 @@
                        Padding="16,8"
                        HorizontalOptions="Center"/>
             </Grid>
-        </Frame>
+        </Border>
     </Grid>
 
 </ContentPage>

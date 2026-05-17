@@ -14,6 +14,7 @@ namespace DroneViewer
                 {
                     fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
                     fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
+                    fonts.AddFont("MaterialSymbolsOutlined_28pt-Light.ttf", "Material");
                 });
 
 #if DEBUG

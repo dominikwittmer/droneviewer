@@ -12,7 +12,7 @@ namespace DroneViewer
         private const string MapFilePathKey = "MapFilePath";
         private const string KeepScreenOnKey = "KeepScreenOn";
         private MBTilesReader? _tileReader;
-        private ReceiverService? _meshtasticReceiver;
+        private ReceiverService? _receiverService;
 
         // Tracking für Drohnen und Operatoren
         private readonly Dictionary<uint, DroneData> _activeDrones = new();
@@ -148,11 +148,11 @@ namespace DroneViewer
 
         private void InitializeMeshtastic()
         {
-            _meshtasticReceiver = new ReceiverService();
-            _meshtasticReceiver.StatusChanged += OnMeshtasticStatus;
-            _meshtasticReceiver.DroneDataReceived += OnDroneDataReceived;
-            _meshtasticReceiver.OperatorDataReceived += OnOperatorDataReceived;
-            _meshtasticReceiver.BatteryDataReceived += OnBatteryDataReceived;
+            _receiverService = new ReceiverService();
+            _receiverService.StatusChanged += OnMeshtasticStatus;
+            _receiverService.DroneDataReceived += OnDroneDataReceived;
+            _receiverService.OperatorDataReceived += OnOperatorDataReceived;
+            _receiverService.BatteryDataReceived += OnBatteryDataReceived;
         }
 
         protected override async void OnAppearing()
@@ -160,7 +160,7 @@ namespace DroneViewer
             base.OnAppearing();
 
             // Resume BLE Service
-            _meshtasticReceiver?.Resume();
+            _receiverService?.Resume();
 
             // Resume Inactivity Timer
             if (_inactivityCheckTimer == null)
@@ -183,7 +183,7 @@ namespace DroneViewer
             base.OnDisappearing();
 
             // Pause BLE Service (aber nicht trennen)
-            _meshtasticReceiver?.Pause();
+            _receiverService?.Pause();
 
             // Pause Inactivity Timer (spart Batterie)
             _inactivityCheckTimer?.Dispose();
@@ -435,8 +435,7 @@ namespace DroneViewer
         {
             MainThread.BeginInvokeOnMainThread(async () =>
             {
-                // Update Battery in map.html
-                await MapView.EvaluateJavaScriptAsync($"updateBattery({data.BatteryLevel})");
+                BatteryLabel.Text = $"🔋 {data.BatteryLevel,3}%";
             });
         }
 
@@ -542,7 +541,7 @@ namespace DroneViewer
                     }
                 }
 
-                var devices = await _meshtasticReceiver!.ScanAsync(TimeSpan.FromSeconds(2));
+                var devices = await _receiverService!.ScanAsync(TimeSpan.FromSeconds(2));
                 if (devices.Count == 0)
                 {
                     await DisplayAlertAsync("Kein Gerät gefunden", "Kein Meshtastic-Empfänger gefunden.", "OK");
@@ -555,7 +554,7 @@ namespace DroneViewer
                 if (selected != null && selected != "Abbrechen")
                 {
                     var device = devices[Array.IndexOf(deviceNames, selected)];
-                    var connected = await _meshtasticReceiver.ConnectToDeviceAsync(device);
+                    var connected = await _receiverService.ConnectToDeviceAsync(device);
 
                     if (connected)
                     {
@@ -572,9 +571,9 @@ namespace DroneViewer
 
         private async void OnDisconnectClicked(object sender, EventArgs e)
         {
-            if (_meshtasticReceiver != null)
+            if (_receiverService != null)
             {
-                await _meshtasticReceiver.DisconnectAsync();
+                await _receiverService.DisconnectAsync();
 
                 // Stoppe Foreground Service
                 StopBleForegroundService();
@@ -757,6 +756,38 @@ namespace DroneViewer
         private void OnCloseDroneListClicked(object sender, EventArgs e)
         {
             DroneListOverlay.IsVisible = false;
+        }
+
+        private async void OnLayerClicked(object sender, TappedEventArgs e)
+        {
+            if (LayerMenu.IsVisible)
+            {
+                await LayerMenu.FadeTo(0, 120);
+
+                LayerMenu.IsVisible = false;
+            }
+            else
+            {
+                LayerMenu.Opacity = 0;
+
+                LayerMenu.IsVisible = true;
+
+                await LayerMenu.FadeTo(1, 120);
+            }
+        }
+
+        private void OnOpenMapClicked(object sender, TappedEventArgs e)
+        {
+            LayerMenu.IsVisible = false;
+
+            // OpenMap aktivieren
+        }
+
+        private void OnSwissTopoClicked(object sender, TappedEventArgs e)
+        {
+            LayerMenu.IsVisible = false;
+
+            // SwissTopo aktivieren
         }
 
         private void UpdateDroneList()
