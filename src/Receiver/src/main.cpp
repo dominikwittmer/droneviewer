@@ -26,6 +26,10 @@
 #include <Wire.h>
 #include <Adafruit_MAX1704X.h>
 #include <Adafruit_NeoPixel.h>
+#include <esp_task_wdt.h>
+#include <esp_heap_caps.h>
+#include <esp_system.h>
+#include <ArduinoJson.h>
 
 // Structure to hold UAV detection data
 struct uav_data
@@ -45,7 +49,36 @@ struct uav_data
   int heading;
 };
 
-#define MAX_UAVS 20
+#define MAX_UAVS 40
+
+#define JSON_DOC_SIZE 512
+#define WATCHDOG_TIMEOUT_SEC 10
+#ifndef WIFI_CALLBACK_TRACE
+#define WIFI_CALLBACK_TRACE 0
+#endif
+
+#define SAFE_STRCPY(dst, src)               \
+  do                                        \
+  {                                         \
+    strncpy((dst), (src), sizeof(dst) - 1); \
+    (dst)[sizeof(dst) - 1] = '\0';          \
+  } while (0)
+
+typedef enum
+{
+  APP_ERR_OK = 0,
+  APP_ERR_QUEUE_FULL,
+  APP_ERR_NULL_POINTER,
+  APP_ERR_BLE_NOTIFY,
+  APP_ERR_WIFI_PARSE,
+  APP_ERR_SERIAL_PARSE,
+  APP_ERR_JSON_OVERFLOW,
+  APP_ERR_BATTERY_SENSOR,
+  APP_ERR_MUTEX_TIMEOUT,
+  APP_ERR_UNKNOWN
+} ErrorCode;
+
+#define HANDLE_ERROR(x) errorHandler(x, __FILE__, __LINE__)
 
 enum uav_source_t : uint8_t
 {
@@ -58,36 +91,43 @@ struct uav_event
 {
   uav_data data;
   uav_source_t source;
+  bool hasBasicId;
+  bool hasLocation;
+  bool hasSystem;
+  bool hasOperatorId;
 };
 
-uav_data uavs[MAX_UAVS] = {};
-
-BLEScan *pBLEScan = nullptr;
-NimBLECharacteristic *pTelemetryCharacteristic = nullptr;
-NimBLECharacteristic *pBatteryLevelCharacteristic = nullptr;
-NimBLECharacteristic *pBatteryChargeStateCharacteristic = nullptr;
-SemaphoreHandle_t bleTxMutex = nullptr;
-QueueHandle_t uavEventQueue = nullptr;
-volatile bool bleClientConnected = false;
-ODID_UAS_Data UAS_data;
-unsigned long last_status = 0;
-unsigned long last_drone_seen = 0;
-unsigned long last_ble_heartbeat = 0;
-unsigned long last_pixel_idle_blink = 0;
-unsigned long pixel_off_at = 0;
-unsigned long data_signal_until = 0;
-Adafruit_MAX17048 maxlipo;
-unsigned long last_battery_update = 0;
-Preferences blePrefs;
-uint32_t blePasskey = 123456;
-String serialCommandBuffer;
-unsigned long buttonPressStart = 0;
-unsigned long buttonLastEdgeAt = 0;
-int buttonRawState = HIGH;
-int buttonDebouncedState = HIGH;
-bool buttonWasPressed = false;
-bool requireButtonReleaseAfterWake = false;
-bool buttonSleepArmed = false;
+static uav_data uavs[MAX_UAVS] = {};
+static BLEScan *pBLEScan = nullptr;
+static NimBLECharacteristic *pTelemetryCharacteristic = nullptr;
+static NimBLECharacteristic *pBatteryLevelCharacteristic = nullptr;
+static NimBLECharacteristic *pBatteryChargeStateCharacteristic = nullptr;
+static SemaphoreHandle_t bleTxMutex = nullptr;
+static QueueHandle_t uavEventQueue = nullptr;
+static volatile bool bleClientConnected = false;
+static ODID_UAS_Data UAS_data;
+static unsigned long last_status = 0;
+static unsigned long last_drone_seen = 0;
+static unsigned long last_ble_heartbeat = 0;
+static unsigned long last_pixel_idle_blink = 0;
+static unsigned long pixel_off_at = 0;
+static unsigned long data_signal_until = 0;
+static Adafruit_MAX17048 maxlipo;
+static unsigned long last_battery_update = 0;
+static Preferences blePrefs;
+static uint32_t blePasskey = 123456;
+static String serialCommandBuffer;
+static unsigned long buttonPressStart = 0;
+static unsigned long buttonLastEdgeAt = 0;
+static int buttonRawState = HIGH;
+static int buttonDebouncedState = HIGH;
+static bool buttonWasPressed = false;
+static bool requireButtonReleaseAfterWake = false;
+static bool buttonSleepArmed = false;
+static const uint32_t RID_MIN_INTERVAL_MS = 1000;
+static uint8_t throttleMacs[MAX_UAVS][6] = {};
+static uint32_t throttleLastMs[MAX_UAVS] = {};
+static bool throttleUsed[MAX_UAVS] = {};
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 21
@@ -120,17 +160,57 @@ enum battery_charge_state_t : uint8_t
 };
 
 // Forward declarations
-void callback(void *, wifi_promiscuous_pkt_type_t);
-void send_json_fast(const uav_data *UAV, const char *extra_fields = "");
-void send_ble_notification(const char *message);
-void send_waypoint_notifications(const uav_data *UAV, const char *source);
-void refresh_ble_whitelist_filter();
-void process_serial_commands();
-void handle_serial_command(const String &cmd);
-bool set_ble_passkey(uint32_t newPasskey);
-bool enqueue_uav_event(const uav_data *data, uav_source_t source);
-const char *source_extra_fields(uav_source_t source);
-bool parse_serial_injected_uav(const String &payload, uav_data *out);
+static void callback(void *, wifi_promiscuous_pkt_type_t);
+static void send_json_fast(const uav_data *UAV, const char *extra_fields = "");
+static void send_ble_notification(const char *message);
+static void send_waypoint_notifications(const uav_data *UAV, const char *source);
+static void refresh_ble_whitelist_filter();
+static void process_serial_commands();
+static void handle_serial_command(const String &cmd);
+static bool set_ble_passkey(uint32_t newPasskey);
+static bool enqueue_uav_event(const uav_data *data, uav_source_t source, bool hasBasicId, bool hasLocation, bool hasSystem, bool hasOperatorId);
+static const char *source_extra_fields(uav_source_t source);
+static bool parse_serial_injected_uav(const String &payload, uav_data *out);
+static void signal_low_battery_blink();
+static void merge_uav_event(uav_data *target, const uav_event *event);
+static bool has_plausible_location(const uav_data *data);
+
+static bool allow_uav_1hz(const uint8_t mac[6], uint32_t nowMs)
+{
+  int freeIndex = -1;
+  for (int i = 0; i < MAX_UAVS; i++)
+  {
+    if (throttleUsed[i] && memcmp(throttleMacs[i], mac, 6) == 0)
+    {
+      if ((uint32_t)(nowMs - throttleLastMs[i]) < RID_MIN_INTERVAL_MS)
+        return false;
+      throttleLastMs[i] = nowMs;
+      return true;
+    }
+    if (!throttleUsed[i] && freeIndex < 0)
+      freeIndex = i;
+  }
+
+  if (freeIndex < 0)
+    freeIndex = 0;
+  throttleUsed[freeIndex] = true;
+  memcpy(throttleMacs[freeIndex], mac, 6);
+  throttleLastMs[freeIndex] = nowMs;
+  return true;
+}
+
+static void errorHandler(ErrorCode err, const char *file, int line)
+{
+  Serial.printf(
+      "[ERROR] code=%d file=%s line=%d heap=%u stack=%u\n",
+      err,
+      file,
+      line,
+      ESP.getFreeHeap(),
+      uxTaskGetStackHighWaterMark(NULL));
+
+  signal_low_battery_blink();
+}
 
 Adafruit_NeoPixel statusPixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -195,10 +275,20 @@ static void update_status_pixel(unsigned long current_millis)
   }
 }
 
-bool enqueue_uav_event(const uav_data *data, uav_source_t source)
+static void print_heap_status()
+{
+  Serial.printf(
+      "[HEAP] free=%u largest=%u min=%u\n",
+      ESP.getFreeHeap(),
+      heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+      esp_get_minimum_free_heap_size());
+}
+
+static bool enqueue_uav_event(const uav_data *data, uav_source_t source, bool hasBasicId, bool hasLocation, bool hasSystem, bool hasOperatorId)
 {
   if (uavEventQueue == nullptr || data == nullptr)
   {
+    HANDLE_ERROR(APP_ERR_NULL_POINTER);
     return false;
   }
 
@@ -206,11 +296,20 @@ bool enqueue_uav_event(const uav_data *data, uav_source_t source)
   memset(&event, 0, sizeof(event));
   memcpy(&event.data, data, sizeof(uav_data));
   event.source = source;
+  event.hasBasicId = hasBasicId;
+  event.hasLocation = hasLocation;
+  event.hasSystem = hasSystem;
+  event.hasOperatorId = hasOperatorId;
 
-  return xQueueSend(uavEventQueue, &event, 0) == pdTRUE;
+  if (xQueueSend(uavEventQueue, &event, 0) != pdTRUE)
+  {
+    return false;
+  }
+
+  return true;
 }
 
-const char *source_extra_fields(uav_source_t source)
+static const char *source_extra_fields(uav_source_t source)
 {
   if (source == UAV_SOURCE_BLE)
   {
@@ -276,7 +375,7 @@ static bool parse_mac_text(const char *text, uint8_t mac[6])
   return index == 6 && part == nullptr;
 }
 
-bool parse_serial_injected_uav(const String &payload, uav_data *out)
+static bool parse_serial_injected_uav(const String &payload, uav_data *out)
 {
   if (out == nullptr)
   {
@@ -284,6 +383,13 @@ bool parse_serial_injected_uav(const String &payload, uav_data *out)
   }
 
   char buffer[256];
+
+  if (payload.length() >= sizeof(buffer))
+  {
+    HANDLE_ERROR(APP_ERR_SERIAL_PARSE);
+    return false;
+  }
+
   memset(buffer, 0, sizeof(buffer));
   payload.toCharArray(buffer, sizeof(buffer));
 
@@ -352,15 +458,18 @@ bool parse_serial_injected_uav(const String &payload, uav_data *out)
       token++;
     }
     strncpy(parsed.uav_id, token, ODID_ID_SIZE);
+    parsed.uav_id[ODID_ID_SIZE - 1] = '\0';
     token = strtok_r(nullptr, " ", &savePtr);
     if (token != nullptr)
     {
       strncpy(parsed.op_id, token, ODID_ID_SIZE);
+      parsed.op_id[ODID_ID_SIZE - 1] = '\0';
     }
   }
   else
   {
     strncpy(parsed.uav_id, "SERIAL", ODID_ID_SIZE);
+    parsed.uav_id[ODID_ID_SIZE - 1] = '\0';
   }
 
   parsed.last_seen = millis();
@@ -401,6 +510,20 @@ static bool has_valid_coords(double lat, double lon)
   return !(lat == 0.0 && lon == 0.0) && (lat >= -90.0 && lat <= 90.0) && (lon >= -180.0 && lon <= 180.0);
 }
 
+static bool is_valid_heading(int heading)
+{
+  return heading >= MIN_DIR && heading <= MAX_DIR;
+}
+
+static int normalize_heading_for_output(int heading)
+{
+  if (is_valid_heading(heading))
+  {
+    return heading;
+  }
+  return 0;
+}
+
 static int32_t deg_to_e7(double deg)
 {
   double scaled = deg * 10000000.0;
@@ -412,7 +535,7 @@ static int32_t deg_to_e7(double deg)
 }
 
 // Get next available UAV slot or reuse existing one
-uav_data *next_uav(uint8_t *mac)
+static uav_data *next_uav(uint8_t *mac)
 {
   for (int i = 0; i < MAX_UAVS; i++)
   {
@@ -425,6 +548,70 @@ uav_data *next_uav(uint8_t *mac)
       return &uavs[i];
   }
   return &uavs[0]; // Fallback to first slot if all are used
+}
+
+static void merge_uav_event(uav_data *target, const uav_event *event)
+{
+  if (target == nullptr || event == nullptr)
+  {
+    HANDLE_ERROR(APP_ERR_NULL_POINTER);
+    return;
+  }
+
+  bool wasUnused = (target->last_seen == 0);
+  if (wasUnused)
+  {
+    memset(target, 0, sizeof(*target));
+    target->heading = INV_DIR;
+  }
+
+  memcpy(target->mac, event->data.mac, sizeof(target->mac));
+  target->rssi = event->data.rssi;
+  target->last_seen = event->data.last_seen;
+
+  if (event->hasBasicId)
+  {
+    SAFE_STRCPY(target->uav_id, event->data.uav_id);
+  }
+
+  if (event->hasLocation)
+  {
+    target->lat_d = event->data.lat_d;
+    target->long_d = event->data.long_d;
+    target->altitude_msl = event->data.altitude_msl;
+    target->height_agl = event->data.height_agl;
+    target->speed = event->data.speed;
+    if (event->data.heading >= MIN_DIR && event->data.heading <= MAX_DIR)
+    {
+      target->heading = event->data.heading;
+    }
+  }
+
+  if (event->hasSystem)
+  {
+    target->base_lat_d = event->data.base_lat_d;
+    target->base_long_d = event->data.base_long_d;
+  }
+
+  if (event->hasOperatorId)
+  {
+    SAFE_STRCPY(target->op_id, event->data.op_id);
+  }
+}
+
+static bool has_plausible_location(const uav_data *data)
+{
+  if (data == nullptr)
+  {
+    return false;
+  }
+
+  bool headingValid = (data->heading >= MIN_DIR && data->heading <= MAX_DIR);
+  bool coordsValid = has_valid_coords(data->lat_d, data->long_d);
+  bool altitudeValid = (data->altitude_msl != INV_ALT);
+  bool speedValid = (data->speed >= 0 && data->speed != INV_SPEED_H);
+
+  return headingValid || coordsValid || altitudeValid || (speedValid && coordsValid);
 }
 
 static void update_battery_level(unsigned long current_millis)
@@ -460,6 +647,9 @@ static void update_battery_level(unsigned long current_millis)
 
   if (bleClientConnected)
   {
+    if (pBatteryLevelCharacteristic->getSubscribedCount() == 0)
+      return;
+
     pBatteryLevelCharacteristic->notify();
     if (pBatteryChargeStateCharacteristic)
     {
@@ -473,6 +663,7 @@ static void update_battery_level(unsigned long current_millis)
   float vbat = maxlipo.cellVoltage();
   Serial.printf("[BAT] SoC: %u%%, Voltage: %.3f V, ChargeRate: %.2f %%/h, State: %u\n", percent, vbat, chargeRatePctPerHour, chargeState);
 };
+
 
 // BLE Advertisement callback handler
 class MyAdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks
@@ -488,8 +679,13 @@ public:
     if (len > 5 && payload[1] == 0x16 && payload[2] == 0xFA &&
         payload[3] == 0xFF && payload[4] == 0x0D)
     {
+      bool hasBasicId = false;
+      bool hasLocation = false;
+      bool hasSystem = false;
+      bool hasOperatorId = false;
       uav_data UAV;
       memset(&UAV, 0, sizeof(UAV));
+      UAV.heading = INV_DIR;
 
       uint8_t *mac = (uint8_t *)device->getAddress().getNative();
       UAV.last_seen = millis();
@@ -504,6 +700,7 @@ public:
         ODID_BasicID_data basic;
         decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
         strncpy(UAV.uav_id, (char *)basic.UASID, ODID_ID_SIZE);
+        hasBasicId = true;
         break;
       }
       case 0x10:
@@ -516,6 +713,7 @@ public:
         UAV.height_agl = (int)loc.Height;
         UAV.speed = (int)loc.SpeedHorizontal;
         UAV.heading = (int)loc.Direction;
+        hasLocation = true;
         break;
       }
       case 0x40:
@@ -524,6 +722,7 @@ public:
         decodeSystemMessage(&sys, (ODID_System_encoded *)odid);
         UAV.base_lat_d = sys.OperatorLatitude;
         UAV.base_long_d = sys.OperatorLongitude;
+        hasSystem = true;
         break;
       }
       case 0x50:
@@ -531,11 +730,15 @@ public:
         ODID_OperatorID_data op;
         decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded *)odid);
         strncpy(UAV.op_id, (char *)op.OperatorId, ODID_ID_SIZE);
+        hasOperatorId = true;
         break;
       }
       }
 
-      enqueue_uav_event(&UAV, UAV_SOURCE_BLE);
+      if (allow_uav_1hz(UAV.mac, UAV.last_seen))
+      {
+        enqueue_uav_event(&UAV, UAV_SOURCE_BLE, hasBasicId, hasLocation, hasSystem, hasOperatorId);
+      }
     }
   }
 };
@@ -609,7 +812,7 @@ public:
   }
 };
 
-void refresh_ble_whitelist_filter()
+static void refresh_ble_whitelist_filter()
 {
   return; // Not used
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
@@ -638,7 +841,7 @@ void refresh_ble_whitelist_filter()
   Serial.printf("BLE whitelist enabled for %d bonded device(s).\n", bondCount);
 }
 
-bool set_ble_passkey(uint32_t newPasskey)
+static bool set_ble_passkey(uint32_t newPasskey)
 {
   if (!is_valid_passkey(newPasskey))
   {
@@ -669,7 +872,7 @@ bool set_ble_passkey(uint32_t newPasskey)
   return true;
 }
 
-void handle_serial_command(const String &cmd)
+static void handle_serial_command(const String &cmd)
 {
   if (cmd.length() == 0)
   {
@@ -734,7 +937,8 @@ void handle_serial_command(const String &cmd)
       return;
     }
 
-    if (enqueue_uav_event(&injected, UAV_SOURCE_SERIAL))
+    bool hasSystem = has_valid_coords(injected.base_lat_d, injected.base_long_d);
+    if (enqueue_uav_event(&injected, UAV_SOURCE_SERIAL, injected.uav_id[0] != '\0', true, hasSystem, injected.op_id[0] != '\0'))
     {
       Serial.println("Injected UAV enqueued.");
     }
@@ -748,7 +952,7 @@ void handle_serial_command(const String &cmd)
   Serial.println("Unknown command. Use HELP.");
 }
 
-void process_serial_commands()
+static void process_serial_commands()
 {
   while (Serial.available() > 0)
   {
@@ -774,47 +978,74 @@ void process_serial_commands()
 }
 
 // Initialize USB Serial (for JSON output) and Serial1 (for mesh/UART)
-void initializeSerial()
+static void initializeSerial()
 {
   Serial.begin(115200);
   Serial.println("USB Serial (for JSON) and UART (Serial1) initialized.");
 }
 
 // Sends JSON payload as fast as possible over USB Serial (includes basic_id).
-void send_json_fast(const uav_data *UAV, const char *extra_fields)
+static void send_json_fast(const uav_data *UAV, const char *extra_fields)
 {
+  if (UAV == nullptr)
+  {
+    HANDLE_ERROR(APP_ERR_NULL_POINTER);
+    return;
+  }
+
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  char json_msg[256];
-  snprintf(json_msg, sizeof(json_msg),
-           "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%.6f,\"drone_long\":%.6f,"
-           "\"drone_altitude\":%d,\"drone_heading\":%d,\"pilot_lat\":%.6f,\"pilot_long\":%.6f,"
-           "\"basic_id\":\"%s\"%s}",
-           mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->heading,
-           UAV->base_lat_d, UAV->base_long_d, UAV->uav_id, extra_fields);
-  Serial.println(json_msg);
 
-  const char *source = "UNKNOWN";
-  if (strstr(extra_fields, "\"source\":\"BLE\""))
+  StaticJsonDocument<JSON_DOC_SIZE> doc;
+
+  doc["mac"] = mac_str;
+  doc["rssi"] = UAV->rssi;
+  doc["drone_lat"] = UAV->lat_d;
+  doc["drone_long"] = UAV->long_d;
+  doc["drone_altitude"] = UAV->altitude_msl;
+  doc["drone_heading"] = normalize_heading_for_output(UAV->heading);
+  doc["drone_heading_valid"] = is_valid_heading(UAV->heading);
+  doc["pilot_lat"] = UAV->base_lat_d;
+  doc["pilot_long"] = UAV->base_long_d;
+  doc["basic_id"] = UAV->uav_id;
+
+  if (strstr(extra_fields, "BLE"))
   {
-    source = "BLE";
+    doc["source"] = "BLE";
   }
-  else if (strstr(extra_fields, "\"source\":\"WiFi\""))
+  else if (strstr(extra_fields, "WiFi"))
   {
-    source = "WiFi";
+    doc["source"] = "WiFi";
   }
-  
-  send_waypoint_notifications(UAV, source);
+  else if (strstr(extra_fields, "Serial"))
+  {
+    doc["source"] = "Serial";
+  }
+  else
+  {
+    doc["source"] = "UNKNOWN";
+  }
+
+  if (measureJson(doc) >= JSON_DOC_SIZE)
+  {
+    HANDLE_ERROR(APP_ERR_JSON_OVERFLOW);
+    return;
+  }
+
+  serializeJson(doc, Serial);
+  Serial.println();
+
+  send_waypoint_notifications(UAV, doc["source"]);
 }
 
-char* replaceSpace(char *input)  // Accept non-const pointer
+static char *replaceSpace(char *input) // Accept non-const pointer
 {
   if (input == nullptr)
     return input;
-  
-  for (size_t i = 0; input[i] != '\0'; i++)  // Iterate until null terminator
+
+  for (size_t i = 0; input[i] != '\0'; i++) // Iterate until null terminator
   {
     if (input[i] == ' ')
       input[i] = '_';
@@ -822,7 +1053,7 @@ char* replaceSpace(char *input)  // Accept non-const pointer
   return input;
 }
 
-void send_waypoint_notifications(const uav_data *UAV, const char *source)
+static void send_waypoint_notifications(const uav_data *UAV, const char *source)
 {
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -835,6 +1066,7 @@ void send_waypoint_notifications(const uav_data *UAV, const char *source)
   {
     int32_t lat_e7 = deg_to_e7(UAV->lat_d);
     int32_t lon_e7 = deg_to_e7(UAV->long_d);
+    int heading_out = normalize_heading_for_output(UAV->heading);
 
     bool has_valid_base_coords = has_valid_coords(UAV->base_lat_d, UAV->base_long_d);
     int32_t base_lat_e7 = deg_to_e7(UAV->base_lat_d);
@@ -843,87 +1075,151 @@ void send_waypoint_notifications(const uav_data *UAV, const char *source)
     // Create local copies and replace spaces
     char uav_id_copy[ODID_ID_SIZE + 1] = {0};
     char op_id_copy[ODID_ID_SIZE + 1] = {0};
-    
-    if (UAV->uav_id[0]) {
+
+    if (UAV->uav_id[0])
+    {
       strncpy(uav_id_copy, UAV->uav_id, ODID_ID_SIZE);
       replaceSpace(uav_id_copy);
     }
-    
-    if (UAV->op_id[0]) {
+
+    if (UAV->op_id[0])
+    {
       strncpy(op_id_copy, UAV->op_id, ODID_ID_SIZE);
       replaceSpace(op_id_copy);
-    }    
+    }
 
-    snprintf(payload, sizeof(payload),
-             "%s %s %s %ld %ld %d %d %d %d %s %ld %ld %d",
-             source, mac_str, UAV->uav_id[0] ? uav_id_copy : mac_str,
-             (long)lat_e7, (long)lon_e7, UAV->altitude_msl, UAV->heading, UAV->speed, UAV->rssi,
-             UAV->op_id[0] ? op_id_copy : mac_str, (long)base_lat_e7, (long)base_lon_e7, has_valid_base_coords ? 1 : 0);
+    int written = snprintf(payload, sizeof(payload),
+                           "%s %s %s %ld %ld %d %d %d %d %s %ld %ld %d",
+                           source, mac_str, UAV->uav_id[0] ? uav_id_copy : mac_str,
+                           (long)lat_e7, (long)lon_e7, UAV->altitude_msl, heading_out, UAV->speed, UAV->rssi,
+                           UAV->op_id[0] ? op_id_copy : mac_str, (long)base_lat_e7, (long)base_lon_e7, has_valid_base_coords ? 1 : 0);
+
+    if (written < 0 || written >= sizeof(payload))
+    {
+      HANDLE_ERROR(APP_ERR_UNKNOWN);
+      return;
+    }
+
     send_ble_notification(payload);
   }
 }
 
-void send_ble_notification(const char *message)
+static void send_ble_notification(const char *message)
 {
-  if (!bleClientConnected || pTelemetryCharacteristic == nullptr || bleTxMutex == nullptr)
+  if (message == nullptr)
+  {
+    HANDLE_ERROR(APP_ERR_NULL_POINTER);
+    return;
+  }
+
+  if (!bleClientConnected ||
+      pTelemetryCharacteristic == nullptr ||
+      bleTxMutex == nullptr)
   {
     return;
   }
 
   if (xSemaphoreTake(bleTxMutex, pdMS_TO_TICKS(10)) != pdTRUE)
   {
+    HANDLE_ERROR(APP_ERR_MUTEX_TIMEOUT);
     return;
   }
 
   std::string framed(message);
   framed.push_back('\0');
 
-  const size_t maxChunkSize = 244; // BLE payload limit with some overhead
+  const size_t maxChunkSize = 244;
   size_t messageLength = framed.size();
   size_t offset = 0;
 
   while (offset < messageLength)
   {
     size_t chunkLength = messageLength - offset;
+
     if (chunkLength > maxChunkSize)
     {
       chunkLength = maxChunkSize;
     }
 
     std::string chunk(framed.data() + offset, chunkLength);
+
+    if (!bleClientConnected)
+    {
+      HANDLE_ERROR(APP_ERR_BLE_NOTIFY);
+      break;
+    }
+
+    if (pTelemetryCharacteristic->getSubscribedCount() == 0)
+    {
+      xSemaphoreGive(bleTxMutex);
+      return;
+    }
+
     pTelemetryCharacteristic->setValue(chunk);
+
+    if (!bleClientConnected)
+    {
+      break;
+    }
+
     pTelemetryCharacteristic->notify();
+
     offset += chunkLength;
-    delay(5);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    esp_task_wdt_reset();
   }
 
   xSemaphoreGive(bleTxMutex);
 }
 
 // Wi-Fi promiscuous packet callback
-void callback(void *buffer, wifi_promiscuous_pkt_type_t type)
+static void callback(void *buffer, wifi_promiscuous_pkt_type_t type)
 {
   if (type != WIFI_PKT_MGMT)
     return;
+
+  if (buffer == nullptr)
+  {
+    HANDLE_ERROR(APP_ERR_NULL_POINTER);
+    return;
+  }
 
   wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buffer;
   uint8_t *payload = packet->payload;
   int length = packet->rx_ctrl.sig_len;
 
+  if (length <= 0)
+  {
+    return;
+  }
+
+  if (length < 16)
+  {
+    return;
+  }
+
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0)
   {
-    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nullptr, payload, length) == 0)
+    char nanSourceMac[6] = {0};
+    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nanSourceMac, payload, length) == 0)
     {
       uav_data UAV;
       memset(&UAV, 0, sizeof(UAV));
+      UAV.heading = INV_DIR;
       memcpy(UAV.mac, &payload[10], 6);
       UAV.rssi = packet->rx_ctrl.rssi;
       UAV.last_seen = millis();
 
+      bool hasBasicId = false;
+      bool hasLocation = false;
+      bool hasSystem = false;
+      bool hasOperatorId = false;
+
       if (UAS_data.BasicIDValid[0])
       {
         strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+        hasBasicId = true;
       }
       if (UAS_data.LocationValid)
       {
@@ -933,68 +1229,126 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type)
         UAV.height_agl = (int)UAS_data.Location.Height;
         UAV.speed = (int)UAS_data.Location.SpeedHorizontal;
         UAV.heading = (int)UAS_data.Location.Direction;
+        hasLocation = has_plausible_location(&UAV);
       }
       if (UAS_data.SystemValid)
       {
         UAV.base_lat_d = UAS_data.System.OperatorLatitude;
         UAV.base_long_d = UAS_data.System.OperatorLongitude;
+        hasSystem = true;
       }
       if (UAS_data.OperatorIDValid)
       {
         strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
+        hasOperatorId = true;
       }
 
-      enqueue_uav_event(&UAV, UAV_SOURCE_WIFI);
+      if (allow_uav_1hz(UAV.mac, UAV.last_seen))
+      {
+        enqueue_uav_event(&UAV, UAV_SOURCE_WIFI, hasBasicId, hasLocation, hasSystem, hasOperatorId);
+      }
+    }
+    else
+    {
+      return;
     }
   }
   else if (payload[0] == 0x80)
   {
     int offset = 36;
-    while (offset < length)
+    while ((offset + 1) < length)
     {
       int typ = payload[offset];
       int len = payload[offset + 1];
-      if ((typ == 0xdd) &&
-          (((payload[offset + 2] == 0x90 && payload[offset + 3] == 0x3a && payload[offset + 4] == 0xe6)) ||
-           ((payload[offset + 2] == 0xfa && payload[offset + 3] == 0x0b && payload[offset + 4] == 0xbc))))
+
+      if ((offset + 2 + len) > length)
       {
-        int j = offset + 7;
-        if (j < length)
+        break;
+      }
+
+      if (typ == 0xdd)
+      {
+        if (len < 5)
         {
-          memset(&UAS_data, 0, sizeof(UAS_data));
-          odid_message_process_pack(&UAS_data, &payload[j], length - j);
-
-          uav_data UAV;
-          memset(&UAV, 0, sizeof(UAV));
-          memcpy(UAV.mac, &payload[10], 6);
-          UAV.rssi = packet->rx_ctrl.rssi;
-          UAV.last_seen = millis();
-
-          if (UAS_data.BasicIDValid[0])
-          {
-            strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
-          }
-          if (UAS_data.LocationValid)
-          {
-            UAV.lat_d = UAS_data.Location.Latitude;
-            UAV.long_d = UAS_data.Location.Longitude;
-            UAV.altitude_msl = (int)UAS_data.Location.AltitudeGeo;
-            UAV.height_agl = (int)UAS_data.Location.Height;
-            UAV.speed = (int)UAS_data.Location.SpeedHorizontal;
-            UAV.heading = (int)UAS_data.Location.Direction;
-          }
-          if (UAS_data.SystemValid)
-          {
-            UAV.base_lat_d = UAS_data.System.OperatorLatitude;
-            UAV.base_long_d = UAS_data.System.OperatorLongitude;
-          }
-          if (UAS_data.OperatorIDValid)
-          {
-            strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
-          }
-
-          enqueue_uav_event(&UAV, UAV_SOURCE_WIFI);
+          offset += len + 2;
+          continue;
         }
+
+        const uint8_t *vendor = &payload[offset + 2];
+        bool isAstmRidVendorIe =
+            (vendor[0] == 0xfa && vendor[1] == 0x0b && vendor[2] == 0xbc && vendor[3] == 0x0d);
+        if (!isAstmRidVendorIe)
+        {
+          offset += len + 2;
+          continue;
+        }
+
+        int j = offset + 7; // 2-byte IE header + 3-byte OUI + 1-byte OUI type + 1-byte message counter
+        int ieEnd = offset + 2 + len;
+        int packLen = ieEnd - j;
+        if (packLen <= 0 || j >= length)
+        {
+          break;
+        }
+
+        memset(&UAS_data, 0, sizeof(UAS_data));
+        int decodeLen = odid_message_process_pack(&UAS_data, &payload[j], (size_t)packLen);
+        if (decodeLen != packLen)
+        {
+          break;
+        }
+
+        uav_data UAV;
+        memset(&UAV, 0, sizeof(UAV));
+        UAV.heading = INV_DIR;
+        memcpy(UAV.mac, &payload[10], 6);
+        UAV.rssi = packet->rx_ctrl.rssi;
+        UAV.last_seen = millis();
+
+        bool hasBasicId = false;
+        bool hasLocation = false;
+        bool hasSystem = false;
+        bool hasOperatorId = false;
+
+        if (UAS_data.BasicIDValid[0])
+        {
+          strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+          hasBasicId = true;
+        }
+        if (UAS_data.LocationValid)
+        {
+          UAV.lat_d = UAS_data.Location.Latitude;
+          UAV.long_d = UAS_data.Location.Longitude;
+          UAV.altitude_msl = (int)UAS_data.Location.AltitudeGeo;
+          UAV.height_agl = (int)UAS_data.Location.Height;
+          UAV.speed = (int)UAS_data.Location.SpeedHorizontal;
+          UAV.heading = (int)UAS_data.Location.Direction;
+          hasLocation = has_plausible_location(&UAV);
+        }
+        if (UAS_data.SystemValid)
+        {
+          UAV.base_lat_d = UAS_data.System.OperatorLatitude;
+          UAV.base_long_d = UAS_data.System.OperatorLongitude;
+          hasSystem = true;
+        }
+        if (UAS_data.OperatorIDValid)
+        {
+          strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
+          hasOperatorId = true;
+        }
+
+        bool hasAnyRidData = hasBasicId || hasLocation || hasSystem || hasOperatorId;
+        if (!hasAnyRidData)
+        {
+          break;
+        }
+
+        if (allow_uav_1hz(UAV.mac, UAV.last_seen))
+        {
+          enqueue_uav_event(&UAV, UAV_SOURCE_WIFI, hasBasicId, hasLocation, hasSystem, hasOperatorId);
+        }
+
+        break;
       }
       offset += len + 2;
     }
@@ -1002,32 +1356,47 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type)
 }
 
 // BLE scanning task running on core 0
-void bleScanTask(void *parameter)
+static void bleScanTask(void *parameter)
 {
-  for (;;)
+  esp_task_wdt_add(NULL);
+
+  pBLEScan->start(0, nullptr, false);
+
+  while (true)
   {
-    pBLEScan->start(1, false);
-    pBLEScan->clearResults();
-    delay(20);
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
 // UAV processing task: single writer for the UAV DB + single sender
-void uavProcessTask(void *parameter)
+static void uavProcessTask(void *parameter)
 {
+  esp_task_wdt_add(NULL);
+
   for (;;)
   {
+    esp_task_wdt_reset();
+
+    static unsigned long last_heap_log = 0;
+
     uav_event event;
     if (xQueueReceive(uavEventQueue, &event, pdMS_TO_TICKS(100)) == pdTRUE)
     {
       last_drone_seen = millis();
       signal_data_received();
       uav_data *dbUAV = next_uav(event.data.mac);
-      memcpy(dbUAV, &event.data, sizeof(uav_data));
+      merge_uav_event(dbUAV, &event);
       send_json_fast(dbUAV, source_extra_fields(event.source));
     }
 
     unsigned long current_millis = millis();
+
+    if ((current_millis - last_heap_log) > 60000UL)
+    {
+      print_heap_status();
+      last_heap_log = current_millis;
+    }
 
     if ((current_millis - last_status) > 60000UL)
     {
@@ -1059,6 +1428,8 @@ void setup()
     rtc_gpio_deinit((gpio_num_t)BUTTON_PIN);
   }
 
+  Serial.printf("Reset reason: %d\n", esp_reset_reason());
+
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   buttonRawState = digitalRead(BUTTON_PIN);
   buttonDebouncedState = buttonRawState;
@@ -1077,7 +1448,7 @@ void setup()
     Serial.println("Wakeup by button (EXT0). Release button to re-arm sleep.");
   }
   load_ble_passkey();
-  uavEventQueue = xQueueCreate(64, sizeof(uav_event));
+  uavEventQueue = xQueueCreate(256, sizeof(uav_event));
   if (uavEventQueue == nullptr)
   {
     Serial.println("Failed to create UAV event queue.");
@@ -1133,8 +1504,8 @@ void setup()
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
-  pBLEScan->setInterval(100);
-  pBLEScan->setWindow(99);
+  pBLEScan->setInterval(160);
+  pBLEScan->setWindow(80);
 
   // Initialize UAV tracking array
   memset(uavs, 0, sizeof(uavs));
@@ -1161,14 +1532,16 @@ void setup()
   signal_data_received();
   delay(250);
 
+  esp_task_wdt_init(WATCHDOG_TIMEOUT_SEC, true);
+
   // Create tasks for BLE scanning and single UAV event processing
-  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(uavProcessTask, "UAVProcessTask", 12000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 16000, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(uavProcessTask, "UAVProcessTask", 20000, NULL, 1, NULL, 1);
 }
 
 // --- Deep Sleep Button Logic ---
 
-void checkButtonForDeepSleep()
+static void checkButtonForDeepSleep()
 {
   int rawState = digitalRead(BUTTON_PIN);
   if (rawState != buttonRawState)
