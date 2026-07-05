@@ -50,6 +50,7 @@ struct uav_data
 };
 
 #define MAX_UAVS 40
+#define UAV_EVENT_QUEUE_LENGTH 512
 
 #define JSON_DOC_SIZE 512
 #define WATCHDOG_TIMEOUT_SEC 10
@@ -116,7 +117,6 @@ static Adafruit_MAX17048 maxlipo;
 static unsigned long last_battery_update = 0;
 static Preferences blePrefs;
 static uint32_t blePasskey = 123456;
-static String serialCommandBuffer;
 static unsigned long buttonPressStart = 0;
 static unsigned long buttonLastEdgeAt = 0;
 static int buttonRawState = HIGH;
@@ -125,6 +125,19 @@ static bool buttonWasPressed = false;
 static bool requireButtonReleaseAfterWake = false;
 static bool buttonSleepArmed = false;
 static const uint32_t RID_MIN_INTERVAL_MS = 1000;
+static bool serialJsonForInjectedEnabled = false;
+static bool serialInjectAckEnabled = false;
+static volatile uint32_t uavQueueHighWatermark = 0;
+static volatile uint32_t uavQueueEnqueueCount = 0;
+static volatile uint32_t uavQueueDequeueCount = 0;
+static volatile uint32_t uavQueueFullCount = 0;
+static volatile uint32_t bleNotifyAttemptCount = 0;
+static volatile uint32_t bleNotifySentCount = 0;
+static volatile uint32_t bleNotifyNoClientCount = 0;
+static volatile uint32_t bleNotifyNoSubCount = 0;
+static volatile uint32_t bleNotifyMutexTimeoutCount = 0;
+static volatile uint32_t bleNotifyErrorCount = 0;
+static volatile uint32_t bleNotifyChunkFailCount = 0;
 static uint8_t throttleMacs[MAX_UAVS][6] = {};
 static uint32_t throttleLastMs[MAX_UAVS] = {};
 static bool throttleUsed[MAX_UAVS] = {};
@@ -161,19 +174,23 @@ enum battery_charge_state_t : uint8_t
 
 // Forward declarations
 static void callback(void *, wifi_promiscuous_pkt_type_t);
-static void send_json_fast(const uav_data *UAV, const char *extra_fields = "");
+static void send_json_fast(const uav_data *UAV, const char *extra_fields = "", bool emitSerial = true);
 static void send_ble_notification(const char *message);
 static void send_waypoint_notifications(const uav_data *UAV, const char *source);
 static void refresh_ble_whitelist_filter();
 static void process_serial_commands();
 static void handle_serial_command(const String &cmd);
 static bool set_ble_passkey(uint32_t newPasskey);
-static bool enqueue_uav_event(const uav_data *data, uav_source_t source, bool hasBasicId, bool hasLocation, bool hasSystem, bool hasOperatorId);
+static bool enqueue_uav_event(const uav_data *data, uav_source_t source, bool hasBasicId, bool hasLocation, bool hasSystem, bool hasOperatorId, TickType_t waitTicks = 0);
 static const char *source_extra_fields(uav_source_t source);
 static bool parse_serial_injected_uav(const String &payload, uav_data *out);
 static void signal_low_battery_blink();
 static void merge_uav_event(uav_data *target, const uav_event *event);
 static bool has_plausible_location(const uav_data *data);
+static void update_uav_queue_metrics();
+static void print_uav_queue_status();
+static void print_ble_notify_status();
+static void checkButtonForDeepSleep();
 
 static bool allow_uav_1hz(const uint8_t mac[6], uint32_t nowMs)
 {
@@ -237,7 +254,7 @@ static void clear_status_pixel()
 
 static void signal_data_received()
 {
-  set_status_pixel(0, 0, 255, 250);
+  set_status_pixel(0, 0, 255, 1000);
   data_signal_until = millis() + 250;
 }
 
@@ -284,7 +301,62 @@ static void print_heap_status()
       esp_get_minimum_free_heap_size());
 }
 
-static bool enqueue_uav_event(const uav_data *data, uav_source_t source, bool hasBasicId, bool hasLocation, bool hasSystem, bool hasOperatorId)
+static void update_uav_queue_metrics()
+{
+  if (uavEventQueue == nullptr)
+  {
+    return;
+  }
+
+  UBaseType_t queued = uxQueueMessagesWaiting(uavEventQueue);
+  if (queued > uavQueueHighWatermark)
+  {
+    uavQueueHighWatermark = queued;
+  }
+}
+
+static void print_uav_queue_status()
+{
+  if (uavEventQueue == nullptr)
+  {
+    Serial.println("[QUEUE] unavailable");
+    return;
+  }
+
+  UBaseType_t queued = uxQueueMessagesWaiting(uavEventQueue);
+  UBaseType_t spaces = uxQueueSpacesAvailable(uavEventQueue);
+  Serial.printf(
+      "[QUEUE] queued=%u spaces=%u high=%lu enq=%lu deq=%lu full=%lu\n",
+      (unsigned int)queued,
+      (unsigned int)spaces,
+      (unsigned long)uavQueueHighWatermark,
+      (unsigned long)uavQueueEnqueueCount,
+      (unsigned long)uavQueueDequeueCount,
+      (unsigned long)uavQueueFullCount);
+}
+
+static void print_ble_notify_status()
+{
+  uint32_t subscribed = 0;
+  if (pTelemetryCharacteristic != nullptr)
+  {
+    subscribed = (uint32_t)pTelemetryCharacteristic->getSubscribedCount();
+  }
+
+  Serial.printf(
+      "[BLE] connected=%u subs=%lu attempt=%lu sent=%lu no_client=%lu no_sub=%lu mutex_to=%lu err=%lu chunk_fail=%lu\n",
+      bleClientConnected ? 1 : 0,
+      (unsigned long)subscribed,
+      (unsigned long)bleNotifyAttemptCount,
+      (unsigned long)bleNotifySentCount,
+      (unsigned long)bleNotifyNoClientCount,
+      (unsigned long)bleNotifyNoSubCount,
+      (unsigned long)bleNotifyMutexTimeoutCount,
+      (unsigned long)bleNotifyErrorCount,
+      (unsigned long)bleNotifyChunkFailCount);
+}
+
+static bool enqueue_uav_event(const uav_data *data, uav_source_t source, bool hasBasicId, bool hasLocation, bool hasSystem, bool hasOperatorId, TickType_t waitTicks)
 {
   if (uavEventQueue == nullptr || data == nullptr)
   {
@@ -301,10 +373,15 @@ static bool enqueue_uav_event(const uav_data *data, uav_source_t source, bool ha
   event.hasSystem = hasSystem;
   event.hasOperatorId = hasOperatorId;
 
-  if (xQueueSend(uavEventQueue, &event, 0) != pdTRUE)
+  if (xQueueSend(uavEventQueue, &event, waitTicks) != pdTRUE)
   {
+    uavQueueFullCount++;
+    update_uav_queue_metrics();
     return false;
   }
+
+  uavQueueEnqueueCount++;
+  update_uav_queue_metrics();
 
   return true;
 }
@@ -450,26 +527,23 @@ static bool parse_serial_injected_uav(const String &payload, uav_data *out)
     parsed.base_long_d = strtod(token, nullptr);
   }
 
-  token = strtok_r(nullptr, "", &savePtr);
+  token = strtok_r(nullptr, " ", &savePtr);
   if (token != nullptr)
   {
-    while (*token == ' ')
-    {
-      token++;
-    }
     strncpy(parsed.uav_id, token, ODID_ID_SIZE);
-    parsed.uav_id[ODID_ID_SIZE - 1] = '\0';
+    parsed.uav_id[ODID_ID_SIZE] = '\0';
+
     token = strtok_r(nullptr, " ", &savePtr);
     if (token != nullptr)
     {
       strncpy(parsed.op_id, token, ODID_ID_SIZE);
-      parsed.op_id[ODID_ID_SIZE - 1] = '\0';
+      parsed.op_id[ODID_ID_SIZE] = '\0';
     }
   }
   else
   {
     strncpy(parsed.uav_id, "SERIAL", ODID_ID_SIZE);
-    parsed.uav_id[ODID_ID_SIZE - 1] = '\0';
+    parsed.uav_id[ODID_ID_SIZE] = '\0';
   }
 
   parsed.last_seen = millis();
@@ -663,7 +737,6 @@ static void update_battery_level(unsigned long current_millis)
   float vbat = maxlipo.cellVoltage();
   Serial.printf("[BAT] SoC: %u%%, Voltage: %.3f V, ChargeRate: %.2f %%/h, State: %u\n", percent, vbat, chargeRatePctPerHour, chargeState);
 };
-
 
 // BLE Advertisement callback handler
 class MyAdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks
@@ -881,14 +954,81 @@ static void handle_serial_command(const String &cmd)
 
   if (cmd.equalsIgnoreCase("HELP"))
   {
-    Serial.println("Commands: HELP | PASSKEY <6digits> | SHOWPASS");
+    Serial.println("Commands: HELP | PASSKEY <6digits> | SHOWPASS | SHOWCFG | SHOWQ | SHOWBLE");
     Serial.println("INJECT <mac> <lat> <lon> <alt_m> <heading_deg> <speed_mps> <rssi> [base_lat] [base_lon] [uav_id] [op_id]");
+    Serial.println("SERIALINJECTJSON <ON|OFF>  (default OFF)");
+    Serial.println("INJECTACK <ON|OFF>  (default OFF)");
     return;
   }
 
   if (cmd.equalsIgnoreCase("SHOWPASS"))
   {
     Serial.printf("Current BLE passkey: %06lu\n", (unsigned long)blePasskey);
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("SHOWCFG"))
+  {
+    Serial.printf("serial_inject_json=%s\n", serialJsonForInjectedEnabled ? "ON" : "OFF");
+    Serial.printf("inject_ack=%s\n", serialInjectAckEnabled ? "ON" : "OFF");
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("SHOWQ"))
+  {
+    print_uav_queue_status();
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("SHOWBLE"))
+  {
+    print_ble_notify_status();
+    return;
+  }
+
+  if (cmd.startsWith("INJECTACK "))
+  {
+    String value = cmd.substring(10);
+    value.trim();
+    value.toUpperCase();
+
+    if (value == "ON" || value == "1" || value == "TRUE")
+    {
+      serialInjectAckEnabled = true;
+      Serial.println("inject_ack=ON");
+    }
+    else if (value == "OFF" || value == "0" || value == "FALSE")
+    {
+      serialInjectAckEnabled = false;
+      Serial.println("inject_ack=OFF");
+    }
+    else
+    {
+      Serial.println("Usage: INJECTACK <ON|OFF>");
+    }
+    return;
+  }
+
+  if (cmd.startsWith("SERIALINJECTJSON "))
+  {
+    String value = cmd.substring(17);
+    value.trim();
+    value.toUpperCase();
+
+    if (value == "ON" || value == "1" || value == "TRUE")
+    {
+      serialJsonForInjectedEnabled = true;
+      Serial.println("serial_inject_json=ON");
+    }
+    else if (value == "OFF" || value == "0" || value == "FALSE")
+    {
+      serialJsonForInjectedEnabled = false;
+      Serial.println("serial_inject_json=OFF");
+    }
+    else
+    {
+      Serial.println("Usage: SERIALINJECTJSON <ON|OFF>");
+    }
     return;
   }
 
@@ -938,13 +1078,19 @@ static void handle_serial_command(const String &cmd)
     }
 
     bool hasSystem = has_valid_coords(injected.base_lat_d, injected.base_long_d);
-    if (enqueue_uav_event(&injected, UAV_SOURCE_SERIAL, injected.uav_id[0] != '\0', true, hasSystem, injected.op_id[0] != '\0'))
+    if (enqueue_uav_event(&injected, UAV_SOURCE_SERIAL, injected.uav_id[0] != '\0', true, hasSystem, injected.op_id[0] != '\0', pdMS_TO_TICKS(20)))
     {
-      Serial.println("Injected UAV enqueued.");
+      if (serialInjectAckEnabled)
+      {
+        Serial.println("Injected UAV enqueued.");
+      }
     }
     else
     {
-      Serial.println("Failed to enqueue injected UAV (queue busy/full).");
+      if (serialInjectAckEnabled)
+      {
+        Serial.println("Failed to enqueue injected UAV (queue busy/full).");
+      }
     }
     return;
   }
@@ -952,27 +1098,38 @@ static void handle_serial_command(const String &cmd)
   Serial.println("Unknown command. Use HELP.");
 }
 
+static char serialCommandBuffer[256];
+static size_t serialCommandLen = 0;
+
 static void process_serial_commands()
 {
   while (Serial.available() > 0)
   {
     char ch = (char)Serial.read();
-    if (ch == '\r')
-    {
-      continue;
-    }
+
+    if (ch == '\r') continue;
 
     if (ch == '\n')
     {
-      serialCommandBuffer.trim();
-      handle_serial_command(serialCommandBuffer);
-      serialCommandBuffer = "";
-      continue;
+      serialCommandBuffer[serialCommandLen] = '\0';
+
+      String cmd(serialCommandBuffer);   // nur kurz hier
+      cmd.trim();
+      handle_serial_command(cmd);
+
+      serialCommandLen = 0;
+      return;
     }
 
-    if (serialCommandBuffer.length() < 240)
+    if (serialCommandLen < sizeof(serialCommandBuffer) - 1)
     {
-      serialCommandBuffer += ch;
+      serialCommandBuffer[serialCommandLen++] = ch;
+    }
+    else
+    {
+      serialCommandLen = 0;
+      Serial.println("[SERIAL] command too long, dropped");
+      return;
     }
   }
 }
@@ -985,7 +1142,7 @@ static void initializeSerial()
 }
 
 // Sends JSON payload as fast as possible over USB Serial (includes basic_id).
-static void send_json_fast(const uav_data *UAV, const char *extra_fields)
+static void send_json_fast(const uav_data *UAV, const char *extra_fields, bool emitSerial)
 {
   if (UAV == nullptr)
   {
@@ -1034,8 +1191,11 @@ static void send_json_fast(const uav_data *UAV, const char *extra_fields)
     return;
   }
 
-  serializeJson(doc, Serial);
-  Serial.println();
+  if (emitSerial)
+  {
+    serializeJson(doc, Serial);
+    Serial.println();
+  }
 
   send_waypoint_notifications(UAV, doc["source"]);
 }
@@ -1106,8 +1266,11 @@ static void send_waypoint_notifications(const uav_data *UAV, const char *source)
 
 static void send_ble_notification(const char *message)
 {
+  bleNotifyAttemptCount++;
+
   if (message == nullptr)
   {
+    bleNotifyErrorCount++;
     HANDLE_ERROR(APP_ERR_NULL_POINTER);
     return;
   }
@@ -1116,11 +1279,13 @@ static void send_ble_notification(const char *message)
       pTelemetryCharacteristic == nullptr ||
       bleTxMutex == nullptr)
   {
+    bleNotifyNoClientCount++;
     return;
   }
 
   if (xSemaphoreTake(bleTxMutex, pdMS_TO_TICKS(10)) != pdTRUE)
   {
+    bleNotifyMutexTimeoutCount++;
     HANDLE_ERROR(APP_ERR_MUTEX_TIMEOUT);
     return;
   }
@@ -1145,12 +1310,14 @@ static void send_ble_notification(const char *message)
 
     if (!bleClientConnected)
     {
+      bleNotifyErrorCount++;
       HANDLE_ERROR(APP_ERR_BLE_NOTIFY);
       break;
     }
 
     if (pTelemetryCharacteristic->getSubscribedCount() == 0)
     {
+      bleNotifyNoSubCount++;
       xSemaphoreGive(bleTxMutex);
       return;
     }
@@ -1159,10 +1326,20 @@ static void send_ble_notification(const char *message)
 
     if (!bleClientConnected)
     {
+      bleNotifyErrorCount++;
       break;
     }
 
     pTelemetryCharacteristic->notify();
+    if (bleClientConnected)
+    {
+      bleNotifySentCount++;
+    }
+    else
+    {
+      bleNotifyChunkFailCount++;
+      break;
+    }
 
     offset += chunkLength;
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -1383,11 +1560,20 @@ static void uavProcessTask(void *parameter)
     uav_event event;
     if (xQueueReceive(uavEventQueue, &event, pdMS_TO_TICKS(100)) == pdTRUE)
     {
+      uavQueueDequeueCount++;
+      update_uav_queue_metrics();
       last_drone_seen = millis();
       signal_data_received();
       uav_data *dbUAV = next_uav(event.data.mac);
       merge_uav_event(dbUAV, &event);
-      send_json_fast(dbUAV, source_extra_fields(event.source));
+
+      bool emitSerial = true;
+      if (event.source == UAV_SOURCE_SERIAL && !serialJsonForInjectedEnabled)
+      {
+        emitSerial = false;
+      }
+
+      send_json_fast(dbUAV, source_extra_fields(event.source), emitSerial);
     }
 
     unsigned long current_millis = millis();
@@ -1395,6 +1581,8 @@ static void uavProcessTask(void *parameter)
     if ((current_millis - last_heap_log) > 60000UL)
     {
       print_heap_status();
+      print_uav_queue_status();
+      print_ble_notify_status();
       last_heap_log = current_millis;
     }
 
@@ -1419,16 +1607,29 @@ static void uavProcessTask(void *parameter)
   }
 }
 
+static void buttonTask(void *parameter)
+{
+  for (;;)
+  {
+    checkButtonForDeepSleep();
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
 void setup()
 {
+
+  initializeSerial();
+  delay(300);
+
+  Serial.printf("Reset reason: %d\n", esp_reset_reason());  
+
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   if (wakeCause == ESP_SLEEP_WAKEUP_EXT0)
   {
     // After EXT0 wake, return RTC IO pin to normal GPIO mode.
     rtc_gpio_deinit((gpio_num_t)BUTTON_PIN);
   }
-
-  Serial.printf("Reset reason: %d\n", esp_reset_reason());
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   buttonRawState = digitalRead(BUTTON_PIN);
@@ -1440,7 +1641,6 @@ void setup()
   digitalWrite(38, HIGH);
   setCpuFrequencyMhz(160);
   nvs_flash_init();
-  initializeSerial();
   last_status = millis();
   if (wakeCause == ESP_SLEEP_WAKEUP_EXT0)
   {
@@ -1448,7 +1648,7 @@ void setup()
     Serial.println("Wakeup by button (EXT0). Release button to re-arm sleep.");
   }
   load_ble_passkey();
-  uavEventQueue = xQueueCreate(256, sizeof(uav_event));
+  uavEventQueue = xQueueCreate(UAV_EVENT_QUEUE_LENGTH, sizeof(uav_event));
   if (uavEventQueue == nullptr)
   {
     Serial.println("Failed to create UAV event queue.");
@@ -1537,6 +1737,7 @@ void setup()
   // Create tasks for BLE scanning and single UAV event processing
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 16000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(uavProcessTask, "UAVProcessTask", 20000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(buttonTask, "ButtonTask", 4096, NULL, 1, NULL, 1);
 }
 
 // --- Deep Sleep Button Logic ---
@@ -1610,6 +1811,8 @@ static void checkButtonForDeepSleep()
 
 void loop()
 {
+  static uint32_t last = 0;
+
   process_serial_commands();
-  checkButtonForDeepSleep();
+  delay(1);
 }
