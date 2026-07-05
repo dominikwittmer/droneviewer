@@ -24,7 +24,8 @@ namespace DroneViewer
         // Update-Throttling für Map-Updates
         private DateTime _lastMapUpdate = DateTime.MinValue;
         private const int MAP_UPDATE_INTERVAL_MS = 100; // Max 10 updates/second
-        private bool _mapUpdatePending = false;
+        private volatile bool _mapUpdatePending = false;
+        private TaskCompletionSource<bool>? _mapLibreReadyTcs;
 
         private static readonly TimeSpan InactivityWarningThreshold = TimeSpan.FromMinutes(3);
         private static readonly TimeSpan InactivityRemovalThreshold = TimeSpan.FromMinutes(5);
@@ -33,6 +34,7 @@ namespace DroneViewer
         {
             InitializeComponent();
             MapView.Navigating += MapView_Navigating;
+            MapView.Navigated += MapView_Navigated;
             InitializeMeshtastic();
             StartInactivityTimer();
 
@@ -198,26 +200,48 @@ namespace DroneViewer
             System.Diagnostics.Debug.WriteLine("MainPage: OnDisappearing - App im Hintergrund");
         }
 
+        private TaskCompletionSource<bool>? _mapReadyTcs;
         private async Task InitializeMapAsync()
         {
             // Prüfe ob Offline-Modus aktiv ist
             Preferences.Remove(MapFilePathKey);
             var isOffline = Preferences.Get(OfflineModeKey, false);
             var mapFilePath = Preferences.Get(MapFilePathKey, Path.Combine(FileSystem.AppDataDirectory, "ch.swisstopo.base.vt.mbtiles"));
+            //var mapTilerKey = Preferences.Get("MapTilerKey", "");
+            var mapTilerKey = "FRfOK7J93u34OL2qCBSy";
+            _mapReadyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            MapView.Source = "map.html";
+            MapView.Source = "mapext.html";
 
-            // Warte bis HTML geladen ist
-            await Task.Delay(1000);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            cts.Token.Register(() => _mapReadyTcs?.TrySetResult(false));
+            await _mapReadyTcs.Task;
+
+            // MapTiler Key setzen (falls vorhanden)
+            if (!string.IsNullOrEmpty(mapTilerKey))
+            {
+                await MapView.EvaluateJavaScriptAsync($"setMapTilerKey('{mapTilerKey}')");
+            }
+
+            _mapLibreReadyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             // JavaScript ausführen um MapLibre-Modus zu setzen
             await MapView.EvaluateJavaScriptAsync($"loadMapLibre({(isOffline ? "true" : "false")})");
 
-            // Warte bis MapLibre geladen ist
-            await Task.Delay(2000);
+            using var mapLoadCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            mapLoadCts.Token.Register(() => _mapLibreReadyTcs?.TrySetResult(false));
+            if (!await _mapLibreReadyTcs.Task)
+            {
+                System.Diagnostics.Debug.WriteLine("InitializeMapAsync: MapLibre load event timed out after 15s");
+            }
+
+            LayerButton.IsEnabled = true;
 
             if (isOffline && !string.IsNullOrEmpty(mapFilePath) && File.Exists(mapFilePath))
             {
+
+                LayerButton.IsEnabled = false;
+
                 try
                 {
                     // MBTiles Reader öffnen
@@ -275,7 +299,7 @@ namespace DroneViewer
                             return;
                         }
 
-                        var tileData = await _tileReader.GetTileAsBase64Async(z, x, y);
+                        var tileData = await Task.Run(() => _tileReader.GetTileAsBase64Async(z, x, y));
                         var dataUrl = tileData ?? "null";
 
                         System.Diagnostics.Debug.WriteLine($"Tile data loaded for ID={requestId}, length={dataUrl.Length}");
@@ -295,6 +319,23 @@ namespace DroneViewer
                     System.Diagnostics.Debug.WriteLine($"ERROR processing tile request: {ex.Message}");
                     System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
                 }
+            }
+            else if (e.Url.StartsWith("maploaded://"))
+            {
+                // map.js meldet: map.on('load') wurde gefeuert – MapLibre ist bereit
+                e.Cancel = true;
+                _mapLibreReadyTcs?.TrySetResult(true);
+                System.Diagnostics.Debug.WriteLine("MapView_Navigating: maploaded:// → MapLibre ready");
+            }
+        }
+
+        private void MapView_Navigated(object? sender, WebNavigatedEventArgs e)
+        {
+            // mapext.html fertig geladen → _mapReadyTcs abschließen
+            if (!e.Url.StartsWith("tile://") && !e.Url.StartsWith("maploaded://"))
+            {
+                _mapReadyTcs?.TrySetResult(e.Result == WebNavigationResult.Success);
+                System.Diagnostics.Debug.WriteLine($"MapView_Navigated: {e.Url}, result={e.Result}");
             }
         }
 
@@ -317,9 +358,16 @@ namespace DroneViewer
 
             MainThread.BeginInvokeOnMainThread(() =>
             {
-                StatusLabel.Text = droneCount == 0
-                    ? "⚡ Bereit - Keine Drohnen"
-                    : $"✈️ {droneCount} Drohne{(droneCount == 1 ? "" : "n")} aktiv";
+                if (_receiverService?.IsConnected == true)
+                {
+                    StatusLabel.Text = droneCount == 0
+                        ? "⚡ Bereit - Keine Drohnen"
+                        : $"✈️ {droneCount} Drohne{(droneCount == 1 ? "" : "n")} aktiv";
+                }
+                else
+                {
+                    StatusLabel.Text = "⛔ Getrennt";
+                }
             });
         }
 
@@ -383,25 +431,8 @@ namespace DroneViewer
                 MainThread.BeginInvokeOnMainThread(() =>
                 {
                     ShowTemporaryStatus($"🔍 Drohne gefunden: {droneName}");
-
-                    // Update Drohnen-Liste wenn sichtbar
-                    if (DroneListOverlay.IsVisible)
-                    {
-                        UpdateDroneList();
-                    }
-                });
-            }
-            else
-            {
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
                     UpdateStatusLabel();
-
-                    // Update Drohnen-Liste wenn sichtbar
-                    if (DroneListOverlay.IsVisible)
-                    {
-                        UpdateDroneList();
-                    }
+                    if (DroneListOverlay.IsVisible) UpdateDroneList();
                 });
             }
 
@@ -449,18 +480,18 @@ namespace DroneViewer
             {
                 _lastMapUpdate = now;
                 _mapUpdatePending = false;
-                MainThread.BeginInvokeOnMainThread(async () => await UpdateMapAsync());
+                _ = MainThread.InvokeOnMainThreadAsync(UpdateMapAsync); // FIX: statt _ = UpdateMapAsync();
             }
             else if (!_mapUpdatePending)
             {
-                // Schedule Update für später
                 _mapUpdatePending = true;
                 var delay = MAP_UPDATE_INTERVAL_MS - (int)timeSinceLastUpdate;
-                Task.Delay(delay).ContinueWith(_ =>
+                _ = Task.Run(async () =>
                 {
+                    await Task.Delay(delay);
                     _lastMapUpdate = DateTime.Now;
                     _mapUpdatePending = false;
-                    MainThread.BeginInvokeOnMainThread(async () => await UpdateMapAsync());
+                    await MainThread.InvokeOnMainThreadAsync(UpdateMapAsync);
                 });
             }
         }
@@ -471,41 +502,55 @@ namespace DroneViewer
             List<OperatorData> operators;
             Dictionary<uint, uint> droneOperatorMap;
 
-            // Schnell Daten kopieren mit Lock
-            lock (_activeDrones)
+            lock (_activeDrones) { drones = _activeDrones.Values.ToList(); }
+            lock (_activeOperators) { operators = _activeOperators.Values.ToList(); }
+            lock (_droneToOperatorMap) { droneOperatorMap = new Dictionary<uint, uint>(_droneToOperatorMap); }
+
+
+            // Map-Updates außerhalb des Locks
+            if (drones.Count > 0)
             {
-                drones = _activeDrones.Values.ToList();
+                var droneUpdates = drones.Select(d =>
+                {
+                    var escapedName = (d.DroneName ?? "Drohne").Replace("'", "\\'");
+                    var operatorId = droneOperatorMap.GetValueOrDefault(d.NodeId, 0u);
+                    return $"{{id:{d.NodeId},lon:{d.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}" +
+                           $",lat:{d.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}" +
+                           $",name:'{escapedName}',alt:{d.Altitude}" +
+                           $",spd:{d.Speed.ToString(System.Globalization.CultureInfo.InvariantCulture)}" +
+                           $",hdg:{d.Heading.ToString(System.Globalization.CultureInfo.InvariantCulture)},opId:{operatorId}}}";
+                });
+                await MapView.EvaluateJavaScriptAsync($"updateDroneMarkers([{string.Join(",", droneUpdates)}])");
             }
 
-            lock (_activeOperators)
+            if (operators.Count > 0)
             {
-                operators = _activeOperators.Values.ToList();
-            }
-
-            lock (_droneToOperatorMap)
-            {
-                droneOperatorMap = new Dictionary<uint, uint>(_droneToOperatorMap);
+                var operatorUpdates = operators.Select(o =>
+                    $"{{id:{o.NodeId},lon:{o.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}" +
+                    $",lat:{o.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}}}");
+                await MapView.EvaluateJavaScriptAsync($"updateOperatorMarkers([{string.Join(",", operatorUpdates)}])");
             }
 
             // Map-Updates außerhalb des Locks
-            foreach (var data in drones)
-            {
-                var escapedName = (data.DroneName ?? "Drohne").Replace("'", "\\'");
-                var operatorId = droneOperatorMap.ContainsKey(data.NodeId) ? droneOperatorMap[data.NodeId] : 0;
+            //foreach (var data in drones)
+            //{
+            //    var escapedName = (data.DroneName ?? "Drohne").Replace("'", "\\'");
+            //    var operatorId = droneOperatorMap.ContainsKey(data.NodeId) ? droneOperatorMap[data.NodeId] : 0;
 
-                await MapView.EvaluateJavaScriptAsync(
-                    $"addDroneMarker({data.NodeId}, {data.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}, {data.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}, '{escapedName}', {data.Altitude}, {data.Speed.ToString(System.Globalization.CultureInfo.InvariantCulture)}, {data.Heading.ToString(System.Globalization.CultureInfo.InvariantCulture)}, {operatorId})");
+            //    await MapView.EvaluateJavaScriptAsync(
+            //        $"addDroneMarker({data.NodeId}, {data.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}, {data.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}, '{escapedName}', {data.Altitude}, {data.Speed.ToString(System.Globalization.CultureInfo.InvariantCulture)}, {data.Heading.ToString(System.Globalization.CultureInfo.InvariantCulture)}, {operatorId})");
 
-                await MapView.EvaluateJavaScriptAsync($"setDroneInactive({data.NodeId}, false)");
-            }
+            //    await MapView.EvaluateJavaScriptAsync($"setDroneInactive({data.NodeId}, false)");
+            //}
 
-            foreach (var data in operators)
-            {
-                await MapView.EvaluateJavaScriptAsync(
-                    $"addOperatorMarker({data.NodeId}, {data.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}, {data.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}, 'Operator')");
+            //foreach (var data in operators)
+            //{
+            //    await MapView.EvaluateJavaScriptAsync(
+            //        $"addOperatorMarker({data.NodeId}, {data.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}, {data.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}, 'Operator')");
 
-                await MapView.EvaluateJavaScriptAsync($"setOperatorInactive({data.NodeId}, false)");
-            }
+            //    await MapView.EvaluateJavaScriptAsync($"setOperatorInactive({data.NodeId}, false)");
+            //}
+
         }
 
         // Bluetooth Buttons
@@ -577,10 +622,24 @@ namespace DroneViewer
 
                 // Stoppe Foreground Service
                 StopBleForegroundService();
+
+                // Alle Daten löschen
+                lock (_activeDrones)
+                {
+                    _activeDrones.Clear();
+                }
+                lock (_activeOperators)
+                {
+                    _activeOperators.Clear();
+                }
+                lock (_droneToOperatorMap)
+                {
+                    _droneToOperatorMap.Clear();
+                }
+                // Alle Marker und Linien auf der Karte entfernen
+                await MapView.EvaluateJavaScriptAsync("removeAllMarkers();");
             }
         }
-
-
 
         private async void OnLocationClicked(object sender, EventArgs e)
         {
@@ -776,18 +835,20 @@ namespace DroneViewer
             }
         }
 
-        private void OnOpenMapClicked(object sender, TappedEventArgs e)
+        private async void OnOpenMapClicked(object sender, TappedEventArgs e)
         {
             LayerMenu.IsVisible = false;
 
             // OpenMap aktivieren
+            await MapView.EvaluateJavaScriptAsync($"switchStyle('osm')");
         }
 
-        private void OnSwissTopoClicked(object sender, TappedEventArgs e)
+        private async void OnSwissTopoClicked(object sender, TappedEventArgs e)
         {
             LayerMenu.IsVisible = false;
 
             // SwissTopo aktivieren
+            await MapView.EvaluateJavaScriptAsync($"switchStyle('swiss')");
         }
 
         private void UpdateDroneList()
@@ -882,7 +943,7 @@ namespace DroneViewer
             // Drohnen-Info (Position, Höhe, Speed)
             var infoLabel = new Label
             {
-                Text = $"Alt: {drone.Altitude}m • {drone.Speed:F1} km/h • {drone.Heading:F0}°",
+                Text = $"Alt: {(drone.Altitude < -100 ? "N/A" : $"{drone.Altitude}m")} • {drone.Speed:F1} km/h • {(drone.Heading > 360 ? "N/A" : $"{drone.Heading:F0}°")}",
                 FontSize = 12,
                 TextColor = Colors.Gray,
                 Margin = new Thickness(12, 2, 0, 0)

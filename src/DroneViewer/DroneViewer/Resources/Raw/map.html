@@ -236,8 +236,6 @@
             console.log('MapLibre script tag added to head');
         }
 
-
-
         function initializeMap() {
             console.log('Initializing map...');
             try {
@@ -1203,6 +1201,29 @@
         let selectedDroneId = null;
         let operatorLines = {}; // Linien zwischen Drohne und Operator
 
+        function removeAllMarkers() {
+            // Drohnen entfernen
+            for (const nodeId in droneMarkers) {
+                droneMarkers[nodeId].marker.remove();
+            }
+            droneMarkers = {};
+            // Operatoren entfernen
+            for (const nodeId in operatorMarkers) {
+                operatorMarkers[nodeId].marker.remove();
+            }
+            operatorMarkers = {};
+            // Linien entfernen
+            for (const lineId in operatorLines) {
+                if (map.getLayer(lineId)) {
+                    map.removeLayer(lineId);
+                }
+                if (map.getSource(lineId)) {
+                    map.removeSource(lineId);
+                }
+            }
+            operatorLines = {};
+        }
+
         // Stelle inaktive Styles nach Scroll wieder her
         function restoreInactiveStyles() {
             // Drohnen
@@ -1466,11 +1487,11 @@
             document.getElementById('overlay-position').textContent =
                 data.lat.toFixed(6) + ', ' + data.lon.toFixed(6);
             document.getElementById('overlay-altitude').textContent =
-                data.altitude + ' m';
+                data.altitude < -100 ? 'N/A' : data.altitude + ' m';
             document.getElementById('overlay-speed').textContent =
                 data.speed.toFixed(1) + ' km/h';
             document.getElementById('overlay-heading').textContent =
-                data.heading.toFixed(0) + '°';
+                data.heading < 0 ? 'N/A' : data.heading.toFixed(0) + '°';
         }
 
         function closeDroneOverlay() {

@@ -2,7 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>LSRequiresIPhoneOS</key>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Diese App benötigt Bluetooth, um Drohnen-Telemetrie vom Meshtastic-Empfänger zu empfangen.</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>Diese App benötigt Bluetooth, um Drohnen-Telemetrie vom Meshtastic-Empfänger zu empfangen.</string>
+
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Der Standort wird für den Bluetooth-Scan und die Kartenanzeige verwendet.</string>
+  <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+  <string>Der Standort wird für den Bluetooth-Scan und die Kartenanzeige verwendet.</string>
+  <key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIDeviceFamily</key>
 	<array>

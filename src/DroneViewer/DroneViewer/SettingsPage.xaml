@@ -38,6 +38,12 @@
             HorizontalOptions="Center" />
             </VerticalStackLayout>
 
+
+            <HorizontalStackLayout Spacing="10">
+                <Label Text="Map Tiler Key" VerticalOptions="Center" />
+                    <Entry x:Name="MapTilerKeyInput" IsPassword="False" Placeholder="Map Tiler Key" TextChanged="MapTilerKeyInput_TextChanged" WidthRequest="300"/>
+            </HorizontalStackLayout>
+
             <!-- Display Settings -->
             <Label Text="Display Settings" FontSize="18" FontAttributes="Bold" Margin="0,20,0,0" />
 

@@ -16,6 +16,7 @@ public class ReceiverService
 
     // Buffer für mehrteilige Nachrichten
     private readonly StringBuilder _messageBuffer = new();
+    private readonly object _bufferLock = new();
     private System.Threading.Timer? _bufferTimeoutTimer;
     private readonly TimeSpan _bufferTimeout = TimeSpan.FromSeconds(20);
 
@@ -77,7 +78,7 @@ public class ReceiverService
         try
         {
             // Starte Scan (ohne Service-Filter, um alle Geräte zu finden)
-           await _adapter.StartScanningForDevicesAsync();
+            await _adapter.StartScanningForDevicesAsync();
 
             // Warte die komplette Timeout-Zeit ab
             await Task.Delay(timeout);
@@ -106,10 +107,8 @@ public class ReceiverService
     {
         try
         {
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, $"⏳ Verbinde mit {device.Name}...");
-            });
+
+            StatusChanged?.Invoke(this, $"⏳ Verbinde mit {device.Name}...");
 
             // Verbindung herstellen
             await _adapter.ConnectToDeviceAsync(device);
@@ -120,40 +119,29 @@ public class ReceiverService
 
             _adapter.DeviceDisconnected += OnDeviceDisconnected;
 
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, "🔍 Suche Service...");
-            });
+            StatusChanged?.Invoke(this, "🔍 Suche Service...");
 
             // Service Discovery - NUR den Custom Service
             var service = await device.GetServiceAsync(ServiceUuid);
             if (service == null)
             {
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, $"❌ Service {ServiceUuid} nicht gefunden!");
-                });
+
+                StatusChanged?.Invoke(this, $"❌ Service {ServiceUuid} nicht gefunden!");
 
                 // Fallback: Alle Services auflisten für Debug
                 await Task.Delay(500);
                 var services = await device.GetServicesAsync();
 
-                MainThread.BeginInvokeOnMainThread(() => 
+                StatusChanged?.Invoke(this, $"📋 Verfügbare Services ({services.Count}):");
+                foreach (var svc in services)
                 {
-                    StatusChanged?.Invoke(this, $"📋 Verfügbare Services ({services.Count}):");
-                    foreach (var svc in services)
-                    {
-                        StatusChanged?.Invoke(this, $"  • {svc.Id}");
-                    }
-                });
+                    StatusChanged?.Invoke(this, $"  • {svc.Id}");
+                }
 
                 return false;
             }
 
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, $"✅ Service gefunden!");
-            });
+            StatusChanged?.Invoke(this, $"✅ Service gefunden!");
 
             // Warte zwischen Service und Characteristic Discovery
             await Task.Delay(300);
@@ -162,19 +150,13 @@ public class ReceiverService
             _telemetryCharacteristic = await service.GetCharacteristicAsync(TelemetryCharacteristicUuid);
             if (_telemetryCharacteristic == null)
             {
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, $"❌ Characteristic {TelemetryCharacteristicUuid} nicht gefunden");
-                });
+                StatusChanged?.Invoke(this, $"❌ Characteristic {TelemetryCharacteristicUuid} nicht gefunden");
 
                 return false;
             }
 
 
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, $"✅ Characteristic gefunden!");
-            });
+            StatusChanged?.Invoke(this, $"✅ Characteristic gefunden!");
 
             // Warte vor MTU-Request
             await Task.Delay(300);
@@ -182,17 +164,11 @@ public class ReceiverService
             // MTU auf 247 setzen für bessere Datenübertragung
             try
             {
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, "📡 Setze MTU auf 247...");
-                });
+                StatusChanged?.Invoke(this, "📡 Setze MTU auf 247...");
 
                 var mtuResult = await device.RequestMtuAsync(247);
 
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, $"✅ MTU gesetzt: {mtuResult}");
-                });
+                StatusChanged?.Invoke(this, $"✅ MTU gesetzt: {mtuResult}");
 
                 Debug.WriteLine($"MTU set to: {mtuResult}");
 
@@ -202,10 +178,8 @@ public class ReceiverService
             catch (Exception mtuEx)
             {
                 // MTU-Fehler sind nicht kritisch, fortfahren
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, $"⚠️ MTU-Request fehlgeschlagen: {mtuEx.Message}");
-                });
+
+                StatusChanged?.Invoke(this, $"⚠️ MTU-Request fehlgeschlagen: {mtuEx.Message}");
                 Debug.WriteLine($"MTU request failed: {mtuEx}");
             }
 
@@ -225,28 +199,21 @@ public class ReceiverService
                 _batteryCharacteristic.ValueUpdated += OnBatteryDataReceived;
                 await _batteryCharacteristic.StartUpdatesAsync();
 
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
-                    StatusChanged?.Invoke(this, "✅ Battery-Monitor aktiv");
-                });
+
+                StatusChanged?.Invoke(this, "✅ Battery-Monitor aktiv");
+
             }
 
             // Finale Bestätigung
             await Task.Delay(200);
 
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, "✅ Verbunden! Warte auf Daten...");
-            });
+            StatusChanged?.Invoke(this, "✅ Verbunden! Warte auf Daten...");
 
             return true;
         }
         catch (Exception ex)
         {
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, $"❌ Fehler: {ex.Message}");
-            });
+            StatusChanged?.Invoke(this, $"❌ Fehler: {ex.Message}");
             Debug.WriteLine($"Connection error: {ex}");
             return false;
         }
@@ -272,19 +239,13 @@ public class ReceiverService
                 };
 
                 // Event auf Main Thread auslösen
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
-                    BatteryDataReceived?.Invoke(this, batteryData);
-                });
+                BatteryDataReceived?.Invoke(this, batteryData);
             }
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"Battery data receive error: {ex}");
-            MainThread.BeginInvokeOnMainThread(() =>
-            {
-                StatusChanged?.Invoke(this, $"❌ Batterie-Fehler: {ex.Message}");
-            });
+            StatusChanged?.Invoke(this, $"❌ Batterie-Fehler: {ex.Message}");
         }
     }
 
@@ -294,14 +255,16 @@ public class ReceiverService
         try
         {
             var data = e.Characteristic.Value;
-
-            // Daten zum Buffer hinzufügen
             var chunk = Encoding.UTF8.GetString(data);
-            _messageBuffer.Append(chunk);
+
+            string bufferContent;
+            lock (_bufferLock)
+            {
+                _messageBuffer.Append(chunk);
+                bufferContent = _messageBuffer.ToString();
+            }
 
             // Prüfe auf Nachrichtenende: \0 oder \n
-            var bufferContent = _messageBuffer.ToString();
-
             // Sicherheit: Maximal 10 Nachrichten pro Empfang verarbeiten
             int processedCount = 0;
             const int maxIterations = 10;
@@ -334,12 +297,16 @@ public class ReceiverService
                     }
 
                     // Entferne verarbeitete Nachricht + Separator
-                    bufferContent = endIndex + 1 < bufferContent.Length 
-                        ? bufferContent.Substring(endIndex + 1) 
+                    bufferContent = endIndex + 1 < bufferContent.Length
+                        ? bufferContent.Substring(endIndex + 1)
                         : string.Empty;
 
-                    _messageBuffer.Clear();
-                    _messageBuffer.Append(bufferContent);
+                    lock (_bufferLock) // ✅
+                    {
+                        _messageBuffer.Clear();
+                        _messageBuffer.Append(bufferContent);
+                    }
+
                     processedCount++;
                 }
                 else
@@ -351,9 +318,9 @@ public class ReceiverService
                         // Starte Timeout-Timer
                         _bufferTimeoutTimer?.Dispose();
                         _bufferTimeoutTimer = new System.Threading.Timer(
-                            OnBufferTimeout, 
-                            null, 
-                            _bufferTimeout, 
+                            OnBufferTimeout,
+                            null,
+                            _bufferTimeout,
                             System.Threading.Timeout.InfiniteTimeSpan);
                     }
                     break;
@@ -363,13 +330,8 @@ public class ReceiverService
         catch (Exception ex)
         {
             Debug.WriteLine($"Receive error: {ex}");
-            Task.Run(() => 
-            {
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, $"❌ Empfangs-Fehler: {ex.Message}");
-                });
-            });
+
+            StatusChanged?.Invoke(this, $"❌ Empfangs-Fehler: {ex.Message}");
             ResetBuffer();
         }
     }
@@ -378,20 +340,14 @@ public class ReceiverService
     {
         if (_messageBuffer.Length > 0)
         {
-            Task.Run(() => 
-            {
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, $"⚠️ Timeout! Buffer verworfen ({_messageBuffer.Length} chars)");
-                });
-            });
+            StatusChanged?.Invoke(this, $"⚠️ Timeout! Buffer verworfen ({_messageBuffer.Length} chars)");
             ResetBuffer();
         }
     }
 
     private void ResetBuffer()
     {
-        _messageBuffer.Clear();
+        lock (_bufferLock) { _messageBuffer.Clear(); }
     }
 
     private void ProcessCompleteMessage(string json)
@@ -401,10 +357,8 @@ public class ReceiverService
             var message = MessageParser.Parse(json);
             if (message == null)
             {
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, "⚠️ Konnte JSON nicht parsen");
-                });
+
+                StatusChanged?.Invoke(this, "⚠️ Konnte JSON nicht parsen");
                 return;
             }
 
@@ -419,21 +373,11 @@ public class ReceiverService
             {
                 var droneData = MessageParser.ToDroneData(message);
                 if (droneData != null)
-                {
-                    MainThread.BeginInvokeOnMainThread(() => 
-                    {
-                        DroneDataReceived?.Invoke(this, droneData);
-                    });
-                }
+                    DroneDataReceived?.Invoke(this, droneData); // ✅ Direkt feuern, kein Main-Thread-Wrap
 
                 var operatorData = MessageParser.ToOperatorData(message);
                 if (operatorData != null)
-                {
-                    MainThread.BeginInvokeOnMainThread(() =>
-                    {
-                        OperatorDataReceived?.Invoke(this, operatorData);
-                    });
-                }
+                    OperatorDataReceived?.Invoke(this, operatorData); // ✅ Direkt feuern
 
                 return;
 
@@ -443,10 +387,7 @@ public class ReceiverService
         catch (Exception ex)
         {
             Debug.WriteLine($"Parse error: {ex}");
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, $"❌ Parse-Fehler: {ex.Message}");
-            });
+            StatusChanged?.Invoke(this, $"❌ Parse-Fehler: {ex.Message}");
         }
     }
 
@@ -504,19 +445,13 @@ public class ReceiverService
                 _connectedDevice = null;
                 _telemetryCharacteristic = null;
 
-                MainThread.BeginInvokeOnMainThread(() => 
-                {
-                    StatusChanged?.Invoke(this, "⛔ Getrennt");
-                });
+                StatusChanged?.Invoke(this, "⛔ Getrennt");
             }
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"Disconnect error: {ex}");
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, $"⚠️ Disconnect-Fehler: {ex.Message}");
-            });
+            StatusChanged?.Invoke(this, $"⚠️ Disconnect-Fehler: {ex.Message}");
         }
     }
 
@@ -524,10 +459,7 @@ public class ReceiverService
     {
         var disconnectedDevice = e.Device;
 
-        MainThread.BeginInvokeOnMainThread(() => 
-        {
-            StatusChanged?.Invoke(this, "⚠️ Verbindung verloren!");
-        });
+        StatusChanged?.Invoke(this, "⚠️ Verbindung verloren!");
 
         _connectedDevice = null;
         _telemetryCharacteristic = null;
@@ -547,10 +479,7 @@ public class ReceiverService
         _isReconnecting = true;
         _reconnectAttempts++;
 
-        MainThread.BeginInvokeOnMainThread(() => 
-        {
-            StatusChanged?.Invoke(this, $"🔄 Verbindungsversuch {_reconnectAttempts}/{MaxReconnectAttempts}...");
-        });
+        StatusChanged?.Invoke(this, $"🔄 Verbindungsversuch {_reconnectAttempts}/{MaxReconnectAttempts}...");
 
         // Versuche nach 2 Sekunden neu zu verbinden
         _reconnectTimer = new System.Threading.Timer(async _ =>
@@ -564,10 +493,7 @@ public class ReceiverService
                     {
                         _reconnectAttempts = 0;
                         _isReconnecting = false;
-                        MainThread.BeginInvokeOnMainThread(() => 
-                        {
-                            StatusChanged?.Invoke(this, "✅ Wiederverbunden!");
-                        });
+                        StatusChanged?.Invoke(this, "✅ Wiederverbunden!");
                     }
                     else
                     {
@@ -578,10 +504,7 @@ public class ReceiverService
                         }
                         else
                         {
-                            MainThread.BeginInvokeOnMainThread(() => 
-                            {
-                                StatusChanged?.Invoke(this, "❌ Verbindung fehlgeschlagen. Maximale Versuche erreicht.");
-                            });
+                            StatusChanged?.Invoke(this, "❌ Verbindung fehlgeschlagen. Maximale Versuche erreicht.");
                         }
                     }
                 }
@@ -610,10 +533,9 @@ public class ReceiverService
         if (_connectedDevice == null && _autoReconnectEnabled)
         {
             _reconnectAttempts = 0; // Reset counter
-            MainThread.BeginInvokeOnMainThread(() => 
-            {
-                StatusChanged?.Invoke(this, "🔄 Prüfe Verbindung...");
-            });
+
+            StatusChanged?.Invoke(this, "🔄 Prüfe Verbindung...");
+
         }
     }
 
@@ -633,7 +555,7 @@ public class DroneData
     public uint NodeId { get; set; }
     public double Latitude { get; set; }
     public double Longitude { get; set; }
-    public int Altitude { get; set; } 
+    public int Altitude { get; set; }
     public double Speed { get; set; } // in km/h oder m/s
     public double Heading { get; set; } // in Grad (0-360)
     public DateTime Timestamp { get; set; } = DateTime.Now;

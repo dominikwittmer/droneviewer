@@ -11,6 +11,7 @@ namespace DroneViewer
         private const string OfflineModeKey = "OfflineMode";
         private const string MapFilePathKey = "MapFilePath";
         private const string KeepScreenOnKey = "KeepScreenOn";
+        private const string MapTilerKeyKey = "MapTilerKey";
 
         public SettingsPage()
         {
@@ -200,6 +201,11 @@ namespace DroneViewer
                 _downloadCts?.Dispose();
                 _downloadCts = null;
             }
+        }
+
+        private void MapTilerKeyInput_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            Preferences.Set(MapTilerKeyKey, e.NewTextValue);
         }
     }
 }

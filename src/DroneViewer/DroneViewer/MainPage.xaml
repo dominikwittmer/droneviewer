@@ -225,7 +225,7 @@
                 </HorizontalStackLayout>
 
                 <!-- Karten layer Button -->
-                <Border BackgroundColor="#80000000"
+                <Border x:Name="LayerButton" BackgroundColor="#80000000"
             StrokeThickness="0"
             WidthRequest="48"
             HeightRequest="48"

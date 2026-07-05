@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Drone Map</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- MapLibre GL CSS - wird dynamisch geladen -->
+    <link id="maplibre-css" rel="stylesheet" />
+
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Fallback während MapLibre lädt */
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-family: Arial, sans-serif;
+            color: #666;
+        }
+
+        /* Drone Info Overlay */
+        #drone-overlay {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            padding: 16px;
+            min-width: 250px;
+            max-width: 300px;
+            display: none;
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        #drone-overlay.visible {
+            display: block;
+        }
+
+        .overlay-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .overlay-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .close-btn {
+            background: #ff4444;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 28px;
+            height: 28px;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 28px;
+            text-align: center;
+            padding: 0;
+        }
+
+            .close-btn:hover {
+                background: #cc0000;
+            }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            padding: 6px 0;
+        }
+
+        .info-label {
+            font-weight: 600;
+            color: #666;
+        }
+
+        .info-value {
+            font-weight: 500;
+            color: #333;
+        }
+
+            .info-value.position {
+                font-family: 'Courier New', monospace;
+                font-size: 12px;
+            }
+
+        /* Marker-CSS minimal */
+        .drone-marker,
+        .operator-marker {
+            cursor: pointer;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="loading">Karte wird geladen...</div>
+    <div id="map"></div>
+
+    <!-- Drone Info Overlay -->
+    <div id="drone-overlay">
+        <div class="overlay-header">
+            <div class="overlay-title" id="overlay-title">Drohne</div>
+            <button class="close-btn" onclick="closeDroneOverlay()">×</button>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Position:</span>
+            <span class="info-value position" id="overlay-position">-</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Höhe:</span>
+            <span class="info-value" id="overlay-altitude">-</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Geschw.:</span>
+            <span class="info-value" id="overlay-speed">-</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Richtung:</span>
+            <span class="info-value" id="overlay-heading">-</span>
+        </div>
+    </div>
+    <script src="map.js"></script>
+</body>
+</html>
