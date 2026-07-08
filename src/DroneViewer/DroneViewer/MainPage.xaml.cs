@@ -207,8 +207,7 @@ namespace DroneViewer
             Preferences.Remove(MapFilePathKey);
             var isOffline = Preferences.Get(OfflineModeKey, false);
             var mapFilePath = Preferences.Get(MapFilePathKey, Path.Combine(FileSystem.AppDataDirectory, "ch.swisstopo.base.vt.mbtiles"));
-            //var mapTilerKey = Preferences.Get("MapTilerKey", "");
-            var mapTilerKey = "FRfOK7J93u34OL2qCBSy";
+            var mapTilerKey = Preferences.Get("MapTilerKey", "");
             _mapReadyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             MapView.Source = "mapext.html";
