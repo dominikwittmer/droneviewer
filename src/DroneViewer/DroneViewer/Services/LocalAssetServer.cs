@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace DroneViewer.Services;
 
@@ -9,6 +10,7 @@ public interface ILocalAssetServer
     string BaseUrl { get; }
     Task StartAsync(CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
+    void SetTileReader(MBTilesReader? reader);
 }
 
 public sealed class LocalAssetServer : ILocalAssetServer, IAsyncDisposable
@@ -17,6 +19,12 @@ public sealed class LocalAssetServer : ILocalAssetServer, IAsyncDisposable
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private Task? _serverTask;
+    private MBTilesReader? _tileReader;
+
+    public void SetTileReader(MBTilesReader? reader)
+    {
+        _tileReader = reader;
+    }
 
     public string BaseUrl => $"http://127.0.0.1:{Port}";
 
@@ -105,7 +113,7 @@ public sealed class LocalAssetServer : ILocalAssetServer, IAsyncDisposable
         }
     }
 
-    private static async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+    private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
     {
         using var _ = client;
         using var networkStream = client.GetStream();
@@ -115,9 +123,7 @@ public sealed class LocalAssetServer : ILocalAssetServer, IAsyncDisposable
         {
             var requestLine = await reader.ReadLineAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(requestLine))
-            {
                 return;
-            }
 
             var parts = requestLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length < 2)
@@ -139,6 +145,35 @@ public sealed class LocalAssetServer : ILocalAssetServer, IAsyncDisposable
                 return;
             }
 
+            var cleanPath = rawPath.Split('?', 2)[0];
+
+            // Route: /tiles/{z}/{x}/{y}
+            var tileMatch = Regex.Match(cleanPath, @"^/tiles/(\d+)/(\d+)/(\d+)$");
+            if (tileMatch.Success)
+            {
+                if (_tileReader == null)
+                {
+                    await WriteResponseAsync(networkStream, 503, "text/plain", "Tile reader not available", cancellationToken);
+                    return;
+                }
+
+                var z = int.Parse(tileMatch.Groups[1].Value);
+                var x = int.Parse(tileMatch.Groups[2].Value);
+                var y = int.Parse(tileMatch.Groups[3].Value);
+
+                var tileData = await _tileReader.GetTileAsync(z, x, y);
+                if (tileData == null)
+                {
+                    await WriteResponseAsync(networkStream, 204, "application/x-protobuf", "", cancellationToken);
+                    return;
+                }
+
+                var tileContentType = GetTileContentType(tileData);
+                await WriteBinaryResponseAsync(networkStream, 200, tileContentType, tileData, cancellationToken);
+                return;
+            }
+
+            // Route: /map-assets/**
             var assetPath = NormalizeAssetPath(rawPath);
             if (assetPath == null)
             {
@@ -162,6 +197,17 @@ public sealed class LocalAssetServer : ILocalAssetServer, IAsyncDisposable
             System.Diagnostics.Debug.WriteLine($"LocalAssetServer Request Fehler: {ex}");
             await WriteResponseAsync(networkStream, 500, "text/plain", "Internal Server Error", cancellationToken);
         }
+    }
+
+    private static string GetTileContentType(byte[] data)
+    {
+        if (data.Length >= 8 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47)
+            return "image/png";
+        if (data.Length >= 2 && data[0] == 0xFF && data[1] == 0xD8)
+            return "image/jpeg";
+        if (data.Length >= 12 && data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46)
+            return "image/webp";
+        return "application/x-protobuf";
     }
 
     private static string? NormalizeAssetPath(string rawPath)
@@ -203,9 +249,11 @@ public sealed class LocalAssetServer : ILocalAssetServer, IAsyncDisposable
         var statusText = statusCode switch
         {
             200 => "OK",
+            204 => "No Content",
             400 => "Bad Request",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            503 => "Service Unavailable",
             _ => "Internal Server Error"
         };
 

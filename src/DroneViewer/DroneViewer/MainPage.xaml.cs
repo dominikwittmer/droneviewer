@@ -12,6 +12,7 @@ namespace DroneViewer
         private const string MapFilePathKey = "MapFilePath";
         private const string KeepScreenOnKey = "KeepScreenOn";
         private MBTilesReader? _tileReader;
+        private readonly ILocalAssetServer _assetServer;
         private ReceiverService? _receiverService;
 
         // Tracking für Drohnen und Operatoren
@@ -30,8 +31,9 @@ namespace DroneViewer
         private static readonly TimeSpan InactivityWarningThreshold = TimeSpan.FromMinutes(3);
         private static readonly TimeSpan InactivityRemovalThreshold = TimeSpan.FromMinutes(5);
 
-        public MainPage()
+        public MainPage(ILocalAssetServer assetServer)
         {
+            _assetServer = assetServer;
             InitializeComponent();
             MapView.Navigating += MapView_Navigating;
             MapView.Navigated += MapView_Navigated;
@@ -195,6 +197,7 @@ namespace DroneViewer
             KeepScreenOn(false);
 
             _tileReader?.Dispose();
+            _assetServer.SetTileReader(null);
             _statusMessageTimer?.Dispose();
 
             System.Diagnostics.Debug.WriteLine("MainPage: OnDisappearing - App im Hintergrund");
@@ -245,16 +248,26 @@ namespace DroneViewer
                     // MBTiles Reader öffnen
                     _tileReader = new MBTilesReader();
                     await _tileReader.OpenAsync(mapFilePath);
+                    _assetServer.SetTileReader(_tileReader);
 
-                    // Metadaten auslesen und loggen
+                    // Metadaten auslesen – maxzoom/minzoom für Style-Patch verwenden
                     var metadata = await _tileReader.GetMetadataAsync();
                     if (metadata.TryGetValue("json", out var jsonMetadata))
                     {
                         System.Diagnostics.Debug.WriteLine($"MBTiles JSON Metadata: {jsonMetadata}");
                     }
 
+                    int tileMaxZoom = 14; // Sicherer Fallback
+                    int tileMinZoom = 0;
+                    if (metadata.TryGetValue("maxzoom", out var maxZoomStr) && int.TryParse(maxZoomStr, out var mz))
+                        tileMaxZoom = mz;
+                    if (metadata.TryGetValue("minzoom", out var minZoomStr) && int.TryParse(minZoomStr, out var nz))
+                        tileMinZoom = nz;
+
+                    System.Diagnostics.Debug.WriteLine($"MBTiles zoom range: {tileMinZoom}–{tileMaxZoom}");
+
                     // Lade Style JSON aus Resources
-                    await LoadAndApplyOfflineStyleAsync();
+                    await LoadAndApplyOfflineStyleAsync(tileMinZoom, tileMaxZoom);
 
                     System.Diagnostics.Debug.WriteLine($"MBTiles reader opened: {mapFilePath}");
                 }
@@ -270,55 +283,7 @@ namespace DroneViewer
 
         private async void MapView_Navigating(object? sender, WebNavigatingEventArgs e)
         {
-            // Tile-Anfragen von JavaScript abfangen
-            if (e.Url.StartsWith("tile://"))
-            {
-                e.Cancel = true;
-
-                try
-                {
-                    System.Diagnostics.Debug.WriteLine($"Tile request received: {e.Url}");
-
-                    // Format: tile://requestId/z/x/y
-                    var parts = e.Url.Replace("tile://", "").Split('/');
-                    if (parts.Length == 4)
-                    {
-                        var requestId = parts[0];
-                        var z = int.Parse(parts[1]);
-                        var x = int.Parse(parts[2]);
-                        var y = int.Parse(parts[3]);
-
-                        System.Diagnostics.Debug.WriteLine($"Parsed tile request: ID={requestId}, z={z}, x={x}, y={y}");
-
-                        if (_tileReader == null)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"ERROR: _tileReader is null!");
-                            await MapView.EvaluateJavaScriptAsync($"receiveTile({requestId}, null)");
-                            return;
-                        }
-
-                        var tileData = await _tileReader.GetTileAsBase64Async(z, x, y);
-                        var dataUrl = tileData ?? "null";
-
-                        System.Diagnostics.Debug.WriteLine($"Tile data loaded for ID={requestId}, length={dataUrl.Length}");
-
-                        // Tile-Daten an JavaScript zurücksenden
-                        await MapView.EvaluateJavaScriptAsync($"receiveTile({requestId}, '{dataUrl}')");
-
-                        System.Diagnostics.Debug.WriteLine($"Tile sent to JavaScript for ID={requestId}");
-                    }
-                    else
-                    {
-                        System.Diagnostics.Debug.WriteLine($"ERROR: Invalid tile URL format: {e.Url}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"ERROR processing tile request: {ex.Message}");
-                    System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
-                }
-            }
-            else if (e.Url.StartsWith("maploaded://"))
+            if (e.Url.StartsWith("maploaded://"))
             {
                 // map.js meldet: map.on('load') wurde gefeuert – MapLibre ist bereit
                 e.Cancel = true;
@@ -327,14 +292,14 @@ namespace DroneViewer
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine($"MapView_Navigating: unknown URL {e.Url} → ignoring");
+                System.Diagnostics.Debug.WriteLine($"MapView_Navigating: {e.Url}");
             }
         }
 
         private void MapView_Navigated(object? sender, WebNavigatedEventArgs e)
         {
             // mapext.html fertig geladen → _mapReadyTcs abschließen
-            if (!e.Url.StartsWith("tile://") && !e.Url.StartsWith("maploaded://"))
+            if (!e.Url.StartsWith("maploaded://"))
             {
                 _mapReadyTcs?.TrySetResult(e.Result == WebNavigationResult.Success);
                 System.Diagnostics.Debug.WriteLine($"MapView_Navigated: {e.Url}, result={e.Result}");
@@ -778,25 +743,36 @@ namespace DroneViewer
 #endif
         }
 
-        private async Task LoadAndApplyOfflineStyleAsync()
+        private async Task LoadAndApplyOfflineStyleAsync(int minZoom = 0, int maxZoom = 14)
         {
             try
             {
                 System.Diagnostics.Debug.WriteLine("Loading offline style JSON...");
 
-                // Style JSON aus Resources laden
                 using var stream = await FileSystem.OpenAppPackageFileAsync("swisstopo-style-offline.json");
                 using var reader = new StreamReader(stream);
                 string styleJson = await reader.ReadToEndAsync();
 
-                System.Diagnostics.Debug.WriteLine($"Style JSON loaded, length: {styleJson.Length}");
+                // maxzoom/minzoom in der Tile-Source auf tatsächliche MBTiles-Werte setzen.
+                // MapLibre verwendet dann automatisch Overzoom (niedrigere Zoom-Tiles skaliert).
+                var styleDoc = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.Nodes.JsonObject>(styleJson);
+                if (styleDoc?["sources"] is System.Text.Json.Nodes.JsonObject sources)
+                {
+                    foreach (var source in sources)
+                    {
+                        if (source.Value is System.Text.Json.Nodes.JsonObject sourceObj
+                            && sourceObj["tiles"] is not null)
+                        {
+                            sourceObj["minzoom"] = minZoom;
+                            sourceObj["maxzoom"] = maxZoom;
+                        }
+                    }
+                }
 
-                // JSON für JavaScript escapen (muss als String übergeben werden)
+                styleJson = styleDoc?.ToJsonString() ?? styleJson;
+                System.Diagnostics.Debug.WriteLine($"Style patched: minzoom={minZoom}, maxzoom={maxZoom}");
+
                 string escapedJson = System.Text.Json.JsonSerializer.Serialize(styleJson);
-
-                System.Diagnostics.Debug.WriteLine("Calling setOfflineModeWithStyle...");
-
-                // JavaScript-Funktion aufrufen
                 await MapView.EvaluateJavaScriptAsync($"setOfflineModeWithStyle({escapedJson});");
 
                 System.Diagnostics.Debug.WriteLine("Offline mode with custom style applied successfully");
@@ -806,7 +782,6 @@ namespace DroneViewer
                 System.Diagnostics.Debug.WriteLine($"Error loading offline style: {ex.Message}");
                 System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
 
-                // Fallback auf alte Methode wenn Style nicht geladen werden kann
                 await MapView.EvaluateJavaScriptAsync("setOfflineMode()");
             }
         }

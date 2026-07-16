@@ -29,11 +29,12 @@ namespace DroneViewer
 #endif
 
             builder.Services.AddSingleton<ILocalAssetServer, LocalAssetServer>();
+            builder.Services.AddSingleton<MainPage>();
 
             var app = builder.Build();
             _ = app.Services.GetRequiredService<ILocalAssetServer>().StartAsync();
 
-            return builder.Build();
+            return app;
         }
     }
 }

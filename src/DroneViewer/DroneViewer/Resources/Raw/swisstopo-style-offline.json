@@ -6,7 +6,7 @@
     "offline-tiles": {
       "type": "vector",
       "tiles": [
-        "mbtiles://{z}/{x}/{y}"
+        "http://127.0.0.1:8080/tiles/{z}/{x}/{y}"
       ],
       "attribution": "© swisstopo (offline)",
       "minzoom": 0,
