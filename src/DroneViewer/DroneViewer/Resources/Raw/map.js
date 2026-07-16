@@ -13,8 +13,8 @@ function applyOfflineStyle(style) {
 
     map.once('style.load', () => {
         map.jumpTo({
-            center: [8.6, 46.5],
-            zoom: 7
+            center: [7.444237, 46.946508],
+            zoom: 8
         });
         restoreCustomLayers();
         console.log('Offline style applied');
