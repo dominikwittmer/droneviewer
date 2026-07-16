@@ -4,6 +4,7 @@ let isOfflineMode = false;
 let mapReady = false;
 
 let tileCache = {};
+let tileInFlight = {};
 let pendingTileRequests = {};
 let tileRequestId = 0;
 let mbtilesProtocolRegistered = false;
@@ -50,6 +51,7 @@ function ensureOfflineProtocolRegistered() {
         const cacheKey = `${z}/${x}/${y}`;
         const isCallbackMode = typeof callback === 'function';
 
+
         if (tileCache[cacheKey]) {
             const cachedBuffer = tileCache[cacheKey];
 
@@ -59,40 +61,41 @@ function ensureOfflineProtocolRegistered() {
             }
 
             return Promise.resolve({ data: cachedBuffer });
+        
         }
 
-        const promise = requestTileFromCSharp(z, x, y)
-            .then(dataUrl => {
-                if (!dataUrl || dataUrl === 'null') {
-                    throw new Error('Tile not found: ' + cacheKey);
-                }
+        if (tileInFlight[cacheKey]) {
+            // Dieselbe Tile wird bereits geladen – Promise wiederverwenden
+            const sharedPromise = tileInFlight[cacheKey];
+            if (isCallbackMode) {
+                sharedPromise.then(buffer => callback(null, buffer, null, null))
+                    .catch(err => callback(err));
+                return { cancel: () => { } };
+            }
+            return sharedPromise.then(buffer => ({ data: buffer }));
+        }
 
+        const tilePromise = requestTileFromCSharp(z, x, y)
+            .then(dataUrl => {
+                if (!dataUrl || dataUrl === 'null') throw new Error('Tile not found: ' + cacheKey);
                 const buffer = convertDataUrlToArrayBuffer(dataUrl);
                 tileCache[cacheKey] = buffer;
-
-                if (isCallbackMode) {
-                    callback(null, buffer, null, null);
-                    return buffer;
-                }
-
-                return { data: buffer };
+                delete tileInFlight[cacheKey];
+                return buffer;
             })
             .catch(error => {
-                console.error('Error loading tile', cacheKey, error);
-
-                if (isCallbackMode) {
-                    callback(error);
-                    return null;
-                }
-
-                return Promise.reject(error);
+                delete tileInFlight[cacheKey];
+                throw error;
             });
 
+        tileInFlight[cacheKey] = tilePromise;
+
         if (isCallbackMode) {
+            tilePromise.then(buffer => callback(null, buffer, null, null))
+                .catch(err => callback(err));
             return { cancel: () => { } };
         }
-
-        return promise;
+        return tilePromise.then(buffer => ({ data: buffer }));
     });
 
     mbtilesProtocolRegistered = true;
@@ -134,6 +137,7 @@ function applyOfflineStyle(style) {
     }
 
     tileCache = {};
+    tileInFlight = {};
     ensureOfflineProtocolRegistered();
 
     map.setStyle(style, { diff: false });

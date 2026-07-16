@@ -297,7 +297,7 @@ namespace DroneViewer
                             return;
                         }
 
-                        var tileData = await Task.Run(() => _tileReader.GetTileAsBase64Async(z, x, y));
+                        var tileData = await _tileReader.GetTileAsBase64Async(z, x, y);
                         var dataUrl = tileData ?? "null";
 
                         System.Diagnostics.Debug.WriteLine($"Tile data loaded for ID={requestId}, length={dataUrl.Length}");
