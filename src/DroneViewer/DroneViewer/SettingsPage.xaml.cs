@@ -1,5 +1,3 @@
-using Android.Content.PM;
-using Android.Preferences;
 using DroneViewer.Services;
 
 namespace DroneViewer

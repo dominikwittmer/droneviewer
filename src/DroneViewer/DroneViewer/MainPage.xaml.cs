@@ -204,7 +204,6 @@ namespace DroneViewer
         private async Task InitializeMapAsync()
         {
             // Prüfe ob Offline-Modus aktiv ist
-            Preferences.Remove(MapFilePathKey);
             var isOffline = Preferences.Get(OfflineModeKey, false);
             var mapFilePath = Preferences.Get(MapFilePathKey, Path.Combine(FileSystem.AppDataDirectory, "ch.swisstopo.base.vt.mbtiles"));
             var mapTilerKey = Preferences.Get("MapTilerKey", "");
@@ -326,6 +325,10 @@ namespace DroneViewer
                 _mapLibreReadyTcs?.TrySetResult(true);
                 System.Diagnostics.Debug.WriteLine("MapView_Navigating: maploaded:// → MapLibre ready");
             }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine($"MapView_Navigating: unknown URL {e.Url} → ignoring");
+            }
         }
 
         private void MapView_Navigated(object? sender, WebNavigatedEventArgs e)
@@ -362,6 +365,10 @@ namespace DroneViewer
                     StatusLabel.Text = droneCount == 0
                         ? "⚡ Bereit - Keine Drohnen"
                         : $"✈️ {droneCount} Drohne{(droneCount == 1 ? "" : "n")} aktiv";
+                }
+                else if (_receiverService?.IsConnecting == true)
+                {
+                    StatusLabel.Text = "⏳ Verbinde...";
                 }
                 else
                 {

@@ -3,6 +3,176 @@ let mapTilerKey = 'KEY';
 let isOfflineMode = false;
 let mapReady = false;
 
+let tileCache = {};
+let pendingTileRequests = {};
+let tileRequestId = 0;
+let mbtilesProtocolRegistered = false;
+
+function convertDataUrlToArrayBuffer(dataUrl) {
+    const commaIndex = dataUrl.indexOf(',');
+    if (commaIndex < 0) {
+        throw new Error('Invalid data URL format');
+    }
+
+    const base64 = dataUrl.substring(commaIndex + 1);
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+
+    return bytes.buffer;
+}
+
+function ensureOfflineProtocolRegistered() {
+    if (mbtilesProtocolRegistered) {
+        return;
+    }
+
+    maplibregl.addProtocol('mbtiles', (params, callback) => {
+        const url = params.url;
+        const match = url.match(/^mbtiles:\/\/(\d+)\/(\d+)\/(\d+)$/);
+
+        if (!match) {
+            const error = new Error('Invalid mbtiles URL: ' + url);
+            if (typeof callback === 'function') {
+                callback(error);
+                return { cancel: () => { } };
+            }
+
+            return Promise.reject(error);
+        }
+
+        const z = Number.parseInt(match[1], 10);
+        const x = Number.parseInt(match[2], 10);
+        const y = Number.parseInt(match[3], 10);
+        const cacheKey = `${z}/${x}/${y}`;
+        const isCallbackMode = typeof callback === 'function';
+
+        if (tileCache[cacheKey]) {
+            const cachedBuffer = tileCache[cacheKey];
+
+            if (isCallbackMode) {
+                callback(null, cachedBuffer, null, null);
+                return { cancel: () => { } };
+            }
+
+            return Promise.resolve({ data: cachedBuffer });
+        }
+
+        const promise = requestTileFromCSharp(z, x, y)
+            .then(dataUrl => {
+                if (!dataUrl || dataUrl === 'null') {
+                    throw new Error('Tile not found: ' + cacheKey);
+                }
+
+                const buffer = convertDataUrlToArrayBuffer(dataUrl);
+                tileCache[cacheKey] = buffer;
+
+                if (isCallbackMode) {
+                    callback(null, buffer, null, null);
+                    return buffer;
+                }
+
+                return { data: buffer };
+            })
+            .catch(error => {
+                console.error('Error loading tile', cacheKey, error);
+
+                if (isCallbackMode) {
+                    callback(error);
+                    return null;
+                }
+
+                return Promise.reject(error);
+            });
+
+        if (isCallbackMode) {
+            return { cancel: () => { } };
+        }
+
+        return promise;
+    });
+
+    mbtilesProtocolRegistered = true;
+    console.log('mbtiles protocol registered');
+}
+
+function requestTileFromCSharp(z, x, y) {
+    return new Promise((resolve, reject) => {
+        const id = tileRequestId++;
+        const timeoutId = window.setTimeout(() => {
+            if (pendingTileRequests[id]) {
+                delete pendingTileRequests[id];
+                reject(new Error(`Tile request timeout for ${z}/${x}/${y}`));
+            }
+        }, 10000);
+
+        pendingTileRequests[id] = { resolve, reject, timeoutId };
+        window.location.href = `tile://${id}/${z}/${x}/${y}`;
+    });
+}
+
+function receiveTile(id, dataUrl) {
+    const pending = pendingTileRequests[id];
+
+    if (!pending) {
+        console.warn('receiveTile: no pending request for id', id);
+        return;
+    }
+
+    clearTimeout(pending.timeoutId);
+    pending.resolve(dataUrl);
+    delete pendingTileRequests[id];
+}
+
+function applyOfflineStyle(style) {
+    if (!map) {
+        console.error('applyOfflineStyle: map is null');
+        return;
+    }
+
+    tileCache = {};
+    ensureOfflineProtocolRegistered();
+
+    map.setStyle(style, { diff: false });
+
+    map.once('style.load', () => {
+        map.jumpTo({
+            center: [8.6, 46.5],
+            zoom: 7
+        });
+        restoreCustomLayers();
+        console.log('Offline style applied');
+    });
+}
+
+async function setOfflineMode(styleJsonString) {
+    try {
+        let style;
+
+        if (styleJsonString && styleJsonString.trim() !== '') {
+            style = JSON.parse(styleJsonString);
+        } else {
+            const response = await fetch(STYLES.offline.url);
+            if (!response.ok) {
+                throw new Error(`Failed to load offline style: ${response.status}`);
+            }
+
+            style = await response.json();
+        }
+
+        applyOfflineStyle(style);
+    } catch (error) {
+        console.error('Error in setOfflineMode:', error);
+    }
+}
+
+function setOfflineModeWithStyle(styleJsonString) {
+    setOfflineMode(styleJsonString);
+}
+
 const STYLES = {
     swiss: {
         url: 'https://vectortiles.geo.admin.ch/styles/ch.swisstopo.basemap.vt/style.json',
@@ -158,9 +328,25 @@ function initializeMap() {
     try {
         console.log('Initializing map...');
 
+        const initialStyle = isOfflineMode
+            ? {
+                version: 8,
+                sources: {},
+                layers: [
+                    {
+                        id: 'background',
+                        type: 'background',
+                        paint: {
+                            'background-color': '#f8f8f8'
+                        }
+                    }
+                ]
+            }
+            : STYLES.swiss.url;
+
         map = new maplibregl.Map({
             container: 'map',
-            style: STYLES.swiss.url,
+            style: initialStyle,
             zoom: 10,
             renderWorldCopies: false
         });

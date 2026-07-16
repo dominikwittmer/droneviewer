@@ -1,5 +1,6 @@
 ﻿using DroneViewer.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Maui.Handlers;
 
 namespace DroneViewer
 {
@@ -24,7 +25,13 @@ namespace DroneViewer
 #if ANDROID
             builder.Services.AddSingleton<IForegroundServiceHelper,
                 DroneViewer.Platforms.Android.ForegroundServiceHelper>();
+
 #endif
+
+            builder.Services.AddSingleton<ILocalAssetServer, LocalAssetServer>();
+
+            var app = builder.Build();
+            _ = app.Services.GetRequiredService<ILocalAssetServer>().StartAsync();
 
             return builder.Build();
         }

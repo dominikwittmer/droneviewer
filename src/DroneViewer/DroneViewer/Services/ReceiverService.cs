@@ -43,6 +43,8 @@ public class ReceiverService
 
     public bool IsConnected => _connectedDevice?.State == Plugin.BLE.Abstractions.DeviceState.Connected;
 
+    public bool IsConnecting => _connectedDevice?.State == Plugin.BLE.Abstractions.DeviceState.Connecting;
+
     public ReceiverService()
     {
         _ble = CrossBluetoothLE.Current;
